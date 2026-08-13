@@ -1,7 +1,7 @@
 ---
 name: feishu-todo-card
 category: knowledge-base
-description: 给某人发一张「今日 TODO」卡片：一张卡列多条待办，每条一个勾选形状(○●/□■/◇◆/△▲/☆★/☐☑)、一个详情链接、一个对应的飞书任务。勾一条只结那一条，其余仍可勾，卡片原地更新。用于每日/每周待办推送、清单式派活、以及任何「一条消息里要办好几件事」的场景。也讲清多选卡与普通单次卡的区别、per-row 幂等边界、以及 task_guid 怎么来。
+description: 给某人发一张「今日 TODO」卡片：一张卡列多条待办，每条一个勾选形状(○●/□■/◇◆/△▲/☆★/☐☑)、一个详情链接、一个对应的飞书任务。勾一条只结那一条，其余仍可勾，卡片原地更新；点错了还能撤销、撤销后能再勾（有轮数上限，见下）。可选联动 mentor 台账的「状态」字段。用于每日/每周待办推送、清单式派活、以及任何「一条消息里要办好几件事」的场景。也讲清多选卡与普通单次卡的区别、per-row 幂等边界、以及 task_guid 怎么来。
 ---
 
 # 飞书 TODO LIST 卡片
@@ -14,7 +14,8 @@ TODO 卡把「一次性」的粒度从**整张卡**降到**每一行**。
 | 场景 | 工具 |
 |---|---|
 | 一张卡列多条待办、逐条勾 | `feishu_todo_card_send` |
-| 勾选后的回调（标飞书任务完成） | `feishu_todo_card_tick`（卡片自动派发，不用手调） |
+| 勾选后的回调（标飞书任务完成、发起撤销窗口） | `feishu_todo_card_tick`（卡片自动派发，不用手调） |
+| 撤销后的回调（重开飞书任务、发起再次可勾） | `feishu_todo_card_untick`（卡片自动派发，不用手调） |
 | 一张卡只要一个答案（同意/驳回、选一项） | `feishu_message_send_card`，**别用** TODO 卡 |
 | 自己拼多选卡（非待办形状） | `feishu_message_send_card` + `multi_use=True` |
 
@@ -45,9 +46,29 @@ feishu_todo_card_send(
 - `shape` — 该行的形状：`circle` ○● / `square` □■ / `diamond` ◇◆ / `triangle` △▲ /
   `star` ☆★ / `check` ☐☑。不填则用卡片级 `shape`。**按任务类型区分形状**就靠这个字段。
 - `detail` — 标题下的第二行（截止时间、验收标准）。
-- `done` — 预置已完成：渲染成删除线且不给按钮。
+- `done` — 预置已完成：渲染成删除线且不给按钮——这类行**没有进入** tick/untick 流程，
+  没有撤销能力（它本来就不是通过点击完成的）。
+- `ledger_record_id` — 这一行对应的 mentor 台账（Bitable）记录 id。配合
+  `feishu_todo_card_send` 的 `ledger_app_token`/`ledger_table_id` 参数一起给，勾选/撤销
+  时会把该记录的「状态」字段同步写成「已交付」/「待开始」。三者缺一不联动，静默跳过，
+  不报错。
 
-未完成 = 空心 + 加粗；已完成 = 实心 + 删除线 + 无按钮。
+未完成 = 空心 + 加粗；已完成 = 实心 + 删除线 + 一个「撤销」按钮（除非已到轮数上限，见下）。
+
+## 撤销：点错了能点回去，但有轮数上限
+
+飞书卡片的一个 action_id **点一次就永久失效**（墓碑机制），而编辑一张已发出的卡片**不能**
+给它追加新的可分发 id——分发表是发卡那一刻就冻死的。所以「撤销后还能再勾」必须在发卡时就把
+后面每一轮会用到的 tick/untick id **全部预注册好**，不是用到才补。
+
+`feishu_todo_card_send` 因此给每一行预注册 `_todo_card_impl._UNDO_ROUNDS`（20）轮的
+tick/untick id 对，但初始卡片只渲染第 0 轮的「标记完成」按钮——其余按钮随着用户点击，由
+`feishu_todo_card_tick`/`feishu_todo_card_untick` 在事后用 `feishu_message_edit_card`
+补上。20 轮对"手滑点错"这种场景足够宽裕；轮数用尽后该行锁定为最终态、不再出现任何按钮，
+这是明确的上限，不是隐藏截断。
+
+**在这个改动上线之前发出去的卡没有这个能力**——它们的分发表里只注册了裸的
+`todo_tick_<行号>`，没有轮次、没有 untick id，撤销按钮永远不会出现在那些卡上。
 
 ## 关于链接：applink，不是 web url
 
@@ -64,9 +85,9 @@ https://applink.feishu.cn/client/todo/detail?guid=<task_guid>
 **逐行 at-most-once，不是逐卡。** 勾第 1 行不影响第 2 行；重复勾第 1 行恰好被拒一次
 （跨进程、跨重启都有效，靠 per-action 墓碑文件）。并发同时勾两行也各自成立。
 
-**每行的 `action` 必须唯一且规范**（无前后空格）。工具自动生成 `todo_tick_<行号>`，自己拼卡时
-务必照办 —— 两行撞名会互相顶掉。**没有可用 action id 的行会退回整卡去重**，也就是退化成普通
-单次卡：点一下整张卡就没了。
+**每行的 `action` 必须唯一且规范**（无前后空格）。工具自动生成 `todo_tick_<行号>_r<轮次>` /
+`todo_untick_<行号>_r<轮次>`，自己拼卡时务必照办 —— 撞名会互相顶掉。**没有可用 action id 的行
+会退回整卡去重**，也就是退化成普通单次卡：点一下整张卡就没了。
 
 **已勾状态会回写快照。** 否则第二次勾会从原始卡渲染，把第一行的完成状态覆盖回未完成。这一步
 是框架做的，但如果日志里出现 `failed to persist ticked card`，就说明后续勾选会显示错行 —— 重发一张新卡。
@@ -86,7 +107,17 @@ https://applink.feishu.cn/client/todo/detail?guid=<task_guid>
 真要出现多进程分别收到同一张卡的回调，锁失效但墓碑仍然成立 —— 退化后果是「某一行的完成状态可能
 被另一进程的回写覆盖」，不是重复执行动作。
 
-**别用 `feishu_message_edit_card` 改 TODO 卡。** 它不重新注册回调，编辑后按钮全是死的。
+**自己拼多选卡时别用 `feishu_message_edit_card` 给它加新按钮。** 编辑一张已发出的卡片不会
+重新注册**分发表**（action id → handler 的映射），凭空加进去的 action id 永远是死的——
+`feishu_todo_card_tick`/`feishu_todo_card_untick` 之所以能安全调用它，是因为它们只引用
+**发卡那一刻就已经预注册好**的下一轮 id（见上面「撤销」一节），不是临时现造一个。
+
+**但 `feishu_message_edit_card` 现在会同步更新 multi_use 卡片的快照**（`edit_card_impl`
+成功后调用 `rewrite_card_snapshot`），所以只要 action id 本身是发卡时就注册好的，编辑后的
+卡片内容不会和框架自己保存的"这张卡长什么样"脱节——不会再出现"下一次点击核对不上快照、
+退化成一张写死的「已提交」占位卡、还要多等几秒去问飞书要最新内容"这种情况。这条修复也是
+`feishu_todo_card_tick`/`_untick` 点完之后能保持原本 TODO 卡样式、响应速度和第一次点击
+一致的原因。
 
 ## 连点会被合并成一个回合
 
@@ -113,16 +144,25 @@ https://applink.feishu.cn/client/todo/detail?guid=<task_guid>
 当交互元素 —— **`checker` 不在其中**，点了不会被消费机制识别，一次性保证和「已完成」回显都不生效。
 所以这里用文本形状字符 + 按钮，形状反而更自由。
 
-## 完成后发生什么
+## 完成/撤销后发生什么
 
-勾选 → 框架把该行改成 `● ~~文字~~` 并原地更新卡片 → 派发 `feishu_todo_card_tick` →
-`PATCH /open-apis/task/v2/tasks/:task_guid` 写 `completed_at`（**毫秒**）+ `update_fields`。
+勾选 → 框架先把该行改成 `● ~~文字~~` 的即时占位并原地更新卡片 → 派发 `feishu_todo_card_tick`
+→ `PATCH /open-apis/task/v2/tasks/:task_guid` 写 `completed_at`（**毫秒**）+
+`update_fields` → 若该行带 `ledger_record_id` 就同步台账「状态」→ 已交付 → 再编辑一次卡片，
+把占位换成真正的完成态 + 下一轮的「撤销」按钮（除非轮数已到上限）。
 
-漏了 `update_fields` 飞书会返回成功但一个字段都不改。这个工具已经带上了，自己调 API 时注意。
+撤销 → 同样先经框架的即时占位 → 派发 `feishu_todo_card_untick` → 把任务
+`completed_at` 写回字符串 `"0"` 重开 → 台账状态（若有）改回「待开始」→ 编辑卡片把该行还原成
+未完成态 + 下一轮的「标记完成」按钮。
 
-行内没有 `task_guid` 时，返回 `task_updated: false` 并说明原因 —— 这不是错误，只是没有任务可动。
+漏了 `update_fields` 飞书会返回成功但一个字段都不改。这两个工具都已经带上了，自己调 API 时注意。
 
-**卡片在这一步已经更新好了。** 不要再发一遍、不要复述点击动作；只有任务更新失败才需要回话。
+行内没有 `task_guid` 时，返回 `task_updated: false` 并说明原因 —— 这不是错误，只是没有任务可动；
+台账联动同理，缺 `ledger_record_id`/`ledger_app_token`/`ledger_table_id` 三者之一就静默跳过。
+
+**卡片会被再编辑一次，但不用你自己发。** 两个工具内部已经调用了 `feishu_message_edit_card`
+把「撤销」/「标记完成」按钮补上去；不要再手动发一遍、不要复述点击动作；只有任务更新失败才
+需要回话。
 
 ## 权限
 

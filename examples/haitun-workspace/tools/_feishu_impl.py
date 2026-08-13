@@ -11,7 +11,7 @@ the SDK's own ``api/drive/comment.py`` does it.
 client, the tenant/user token dance (``_invoke``), rate-limit retries, capability
 inference, and the UAT/identity stores. The per-domain implementations were split
 out to ``_feishu/{message,doc,sheet,bitable,contact,approval,auth,calendar,drive,
-attendance,task}.py`` and are re-exported at the bottom of this file, so importing
+attendance,task,leave,mentor_ledger}.py`` and are re-exported at the bottom of this file, so importing
 this module still reaches every name it always did and each domain can be edited,
 reviewed, and tested on its own.
 
@@ -984,6 +984,12 @@ from _feishu.drive import (  # noqa: E402,F401
     download_file_impl,
     export_doc_impl,
     get_message_image_impl,
+)
+from _feishu.leave import (  # noqa: E402,F401
+    query_leave_impl,
+)
+from _feishu.mentor_ledger import (  # noqa: E402,F401
+    mentor_ledger_ensure_impl,
 )
 from _feishu.message import (  # noqa: E402,F401
     _ANNOUNCEMENT_ERROR_HINTS,

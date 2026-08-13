@@ -364,6 +364,76 @@ async def test_edit_card_leaves_card_2_schema_alone(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_edit_card_syncs_channel_snapshot_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful edit must sync the Channel's own click-time card snapshot — otherwise
+    the next click on this card fails its snapshot check, falls through to a slow
+    fetch-and-fallback, and degrades into a generic "已提交" placeholder (see
+    ``edit_card_impl``'s docstring)."""
+    message_mod = importlib.import_module("_feishu.message")
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+    rewrite_calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_rewrite(message_id: str, card: dict[str, Any], appdata: str = "") -> bool:
+        rewrite_calls.append((message_id, card))
+        return True
+
+    monkeypatch.setattr(message_mod, "rewrite_card_snapshot", fake_rewrite)
+    card = {"config": {"wide_screen_mode": True}, "elements": [{"tag": "markdown", "content": "已完成"}]}
+
+    result = await _impl.edit_card_impl("om_card", json.dumps(card))
+
+    assert result["ok"] is True
+    assert len(rewrite_calls) == 1
+    synced_id, synced_card = rewrite_calls[0]
+    assert synced_id == "om_card"
+    # The synced content is the update_multi-normalized card actually sent to Feishu.
+    assert synced_card == {**card, "config": {"wide_screen_mode": True, "update_multi": True}}
+
+
+@pytest.mark.asyncio
+async def test_edit_card_skips_snapshot_sync_on_api_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    message_mod = importlib.import_module("_feishu.message")
+
+    async def fake_invoke(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"ok": False, "code": 99999, "msg": "boom", "message": "err"}
+
+    monkeypatch.setattr(_impl, "_invoke", fake_invoke)
+    rewrite_calls: list[Any] = []
+
+    async def fake_rewrite(*a: Any, **k: Any) -> bool:
+        rewrite_calls.append(a)
+        return True
+
+    monkeypatch.setattr(message_mod, "rewrite_card_snapshot", fake_rewrite)
+    card = {"config": {"wide_screen_mode": True}, "elements": []}
+
+    result = await _impl.edit_card_impl("om_card", json.dumps(card))
+
+    assert result["ok"] is False
+    assert rewrite_calls == [], "一次失败的编辑不该去同步快照——飞书那边内容根本没变"
+
+
+@pytest.mark.asyncio
+async def test_edit_card_snapshot_sync_failure_does_not_fail_the_edit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The edit itself already succeeded in Feishu — a snapshot-sync failure is logged,
+    not surfaced as an error (the card the user sees is correct either way)."""
+    message_mod = importlib.import_module("_feishu.message")
+    cap = _CapturedInvoke({})
+    monkeypatch.setattr(_impl, "_invoke", cap)
+
+    async def failing_rewrite(*a: Any, **k: Any) -> bool:
+        raise RuntimeError("appdata unreachable")
+
+    monkeypatch.setattr(message_mod, "rewrite_card_snapshot", failing_rewrite)
+    card = {"config": {"wide_screen_mode": True}, "elements": []}
+
+    result = await _impl.edit_card_impl("om_card", json.dumps(card))
+
+    assert result == {"ok": True, "message_id": "om_card", "edited": True, "msg_type": "interactive"}
+
+
+@pytest.mark.asyncio
 async def test_edit_card_rejects_bad_json(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke({})
     monkeypatch.setattr(_impl, "_invoke", cap)

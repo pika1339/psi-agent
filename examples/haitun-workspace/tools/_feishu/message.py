@@ -21,7 +21,7 @@ from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
 from loguru import logger
 
-from psi_agent.channel.feishu._card_store import save_card_snapshot
+from psi_agent.channel.feishu._card_store import rewrite_card_snapshot, save_card_snapshot
 from psi_agent.session.runtime_context import get_session_id
 
 # ── IM (messaging) — find chat, send, reply-in-thread, list messages ──────────
@@ -452,10 +452,24 @@ async def edit_card_impl(message_id: str, card_json: str, user_key: str = "") ->
     approval 已通过, disable buttons, refresh a dashboard — without the recipient losing
     the original bubble.
 
-    The card's callback context is **not** re-registered: an already-sent card's
-    handlers were snapshotted at send time and consumed on first click, so an update
-    changes what the card *shows*, not what its buttons dispatch. Send a new card with
-    ``send_card_impl`` when the actions themselves must change.
+    The card's callback **dispatch table** (which ``action_handlers`` a button's id
+    routes to) is **not** re-registered: it was snapshotted at send time and is frozen —
+    a button whose id was never registered still cannot be made to dispatch anywhere.
+    Send a new card with ``send_card_impl`` when the actions themselves must change.
+
+    For a ``multi_use`` card (see ``send_card_impl``), the Channel's own per-click
+    snapshot of "what this card currently shows" IS updated here — a successful edit
+    calls ``rewrite_card_snapshot`` with the new content, so the next click on this card
+    is checked against what the user actually sees, not against the Channel's earlier
+    generic single-row placeholder. Without this, a card edited outside the Channel's own
+    tick flow would drift from its stored snapshot, and every subsequent click would fail
+    that check, fall through to an expensive ``fetch_message`` reconciliation attempt
+    (which also fails — Feishu's fetch returns a different, incompatible card
+    representation), and finally degrade to a generic "已提交" placeholder card. Silently
+    best-effort: ``rewrite_card_snapshot`` itself is a no-op (returns ``False``) for a
+    non-``multi_use`` snapshot or one that no longer exists, so this never affects a card
+    outside that flow, and a failure here does not turn a successful edit into an error —
+    the card was already updated in Feishu either way.
     """
     mid, bad = _require_message_id(message_id, "update")
     if bad is not None:
@@ -471,10 +485,15 @@ async def edit_card_impl(message_id: str, card_json: str, user_key: str = "") ->
             "card_json must be a JSON object — the full replacement card, e.g. "
             '{"schema":"2.0","body":{"elements":[...]}} or {"config":...,"elements":[...]}.'
         )
-    content = json.dumps(_ensure_update_multi(card), ensure_ascii=False)
+    normalized_card = _ensure_update_multi(card)
+    content = json.dumps(normalized_card, ensure_ascii=False)
     res = await _core._invoke(_build_edit_card_request(mid, content), user_key=user_key, prefer="tenant")
     if not res["ok"]:
         return _with_hint(res, _CARD_EDIT_ERROR_HINTS)
+    try:
+        await rewrite_card_snapshot(mid, normalized_card)
+    except Exception as exc:
+        logger.warning(f"failed to sync Feishu card snapshot after edit for {mid} — {exc!r}")
     return {"ok": True, "message_id": mid, "edited": True, "msg_type": "interactive"}
 
 
