@@ -41,7 +41,7 @@ ToB 没有安装器, 结构上不存在这个问题 —— 这一节只对 ToC �
 
 | 类 | 内容 | 谁写 |
 |---|---|---|
-| 出厂内容 | `systems/` `tools/` `skills/` `triggers/` `channel_events/` `bin/` `config/` `docs/` `flows/` `fact-cards/` `platforms/`, 以及 `AGENTS.md` / `IDENTITY.md` / `TOOLS.md` / `BOOTSTRAP.md` / `HEARTBEAT.md` 这些提示词模板 | 安装器 (每次安装覆盖为本版内容) |
+| 出厂内容 | `systems/` `tools/` `skills/` `triggers/` `channel_events/` `bin/` `config/` `docs/` `flows/` `fact-cards/` `platforms/` `sources/`, 以及 `AGENTS.md` / `IDENTITY.md` / `TOOLS.md` / `BOOTSTRAP.md` / `HEARTBEAT.md` 这些提示词模板 | 安装器 (每次安装覆盖为本版内容) |
 | 用户数据 | `SOUL.md` `USER.md` `schedules/` | agent 自己改写 / 用户积累 / `schedule_manage` 写 |
 
 **当前状态: `.iss` 里这两类仍混在同一条通配 `Source` 里, 结构上分不出来。**
@@ -165,6 +165,20 @@ service tools:
   引擎算出的补贴与到手价必须与**已上线、有 golden 数据集**的 `subsidy_calc` 逐例相等
   （家电/数码两档、价格门槛两侧、能效门）。相等才说明"一个引擎各场景填规则"不是口号。
 
+### 券源注册表（`sources/`）—— 「去哪儿找地方消费券」
+
+地方消费券（A2）的线索来源**全部住在 `sources/voucher-sources.yaml`**，`voucher_clues` 经
+`_voucher_sources.py` 读它。与资料卡同一套分工：**工具里不留第二份源清单**。
+
+- **`city_codes` 是生成物，不是手编清单**：368 个「城市名 → 子域代码」由站点自己的城市索引页
+  推导而来。所以文件带 `derived_from` / `derived_at` —— 数据从哪来、什么时候来的必须与值一起走，
+  否则下游判断不了它有多新。
+- **`derived` 只说明「这个城市有子域」，不代表专题页一定可访问**：实测存在拼图风控，
+  同一批城市里一半返回「请完成拼图验证以继续访问」。可用性只能在抓取那一刻判断，
+  所以工具带 `blocked` 这个 reason（见下表）。
+- **查不到的城市不猜拼音**：猜出来的代码会 404，而 404 与「这个城市没有券」在返回体里长得一样 ——
+  那是最贵的一类错。加城市 = 往 `city_codes` 加一条。
+
 | Tool | Notes |
 |---|---|
 | `saving_facts` (`saving_facts.py`) | 省钱事实草稿 → **事实契约 payload**（校验 + 组装）。**只做校验与组装，不判定、不计算、不联网** —— 判定与计算在本体侧（本体 §3.1 的公式通道就是通用计算引擎），本工具是 agent 侧的**事实供给方**，是《Agent 组 → 本体组：运行期事实供给契约》在 agent 侧的可执行版本。两条最容易丢的契约在这里被机械挡住：① **`MISSING` 不得被静默填成 `false`** —— 草稿里 `held: null` 表示「不知道」→ 进 `missing[]`；写 `false` 是**否定断言，必须给 `source`**，否则 `E_NEGATION_WITHOUT_EVIDENCE` 直接拒；② **金额基数必须标明**（`price_basis` 只能是 `标价`/`结算价`，缺了报 `E_PRICE_BASIS`），因为基数传错不报错、只会安静算错（实测差 30 元且返回体看不出异常）。校验不通过返回稳定错误码 + `path`，**不产出半成品 payload**。刻意**不认识任何政策参数**：比例、上限、门槛值、品类枚举全由调用方给出，这里只查「形状对不对」。 |
@@ -174,6 +188,8 @@ service tools:
 | `saving_login` (`saving_login.py` + `platforms/*.yaml`) | **省钱场景的平台授权层** —— 「agent 以用户身份读账户」这条链路的第一环。六个 action：`list`（列出所有平台及授权状态，用户能看见 agent 记住了哪些）/ `status`（查状态，**只读记录不探测**）/ `report`（把浏览器**地址栏**的当前 URL 报进来，按平台定义判定）/ `confirm`（拿不到 URL 时由用户确认）/ **`blocked`**（模型在浏览器里看到平台要求**验证码/人机校验/访问过于频繁**时调用 —— 写入记录并返回一段**规范话术**，同时要求停下：**不自动重试、不换入口再试**；话术必然给出两条出口「手动过验证后回复继续」与「**改发截图降级**」。**检测交给看得见页面的模型，工具不做页面特征猜测** —— 猜错会让 agent 在不必停的时候停下）/ `forget`（撤销授权）。**判定保守**：落到 `login_hosts` → `logged_out`（可信）；到达 `gate` 页本身 → `logged_in`（依赖配置正确）；其余一律 `unknown` 且**不写记录** —— 与 facts 契约「`MISSING` 不得填成 `false`」同一条纪律，说错比说不出坏得多。**两个数据面刻意分开**：平台怎么进在出厂内容 `platforms/<key>.yaml`（加平台 = 加文件，不改代码），授权记录在运行期状态 `{appdata}/saving/platforms.json`（记的是这台机器上这个用户核过什么）。记录**不自动失效**（一次授权覆盖后续），超期只回 `stale` 提示；`forget` 才撤销。 |
 | `saving_read` (`saving_read.py` + `_browser_eval.py` + `platforms/*.yaml` 的 `reads:`) | **省钱场景的页面事实层** —— 链路的最后一环：`saving_login` 确认登录 → agent 用 `browser_navigate` 打开读定义里的 url → 本工具把**当前页面**读成结构化事实。**不导航、不点击、不重试**（导航是 agent 的活：它看得见登录墙，也要在验证码前停下），只回答「现在这一页，这段 JS 读出什么」。**一条不能破的线：「读不到」≠「没有」** —— 同一段选择器读到 0 张券，可能是券包**真的空**（模块容器 `.mod-coupon`/`.coupon-items` 还在、里面没券），也可能是**页面结构变了**（容器都找不到），两者计数完全一样，**只有 `markers` 能区分**。所以：容器在 + 0 张券 → `ok=true, empty=true`（这是事实）；容器缺 → `ok=false, reason=page_shape_changed`；**凡是 `ok=false` 的返回一律不带 `count`/`coupons`/`empty`** —— 少一个字段只是少一个信息，多一个 `count: 0` 就是一条会被下游当真的假事实（与 facts 契约「`MISSING` 不得被静默填成 `false`」同源）。页面身份按 `host` + `path_prefix` 判定，落到 `login_hosts` → `logged_out` 并附 gate 与下一步；走错页 → 回 `expected.url` 让 agent 重新导航；浏览器被用户关掉 → `browser_closed` 并要求**停下告知用户、不擅自重开**（承 `_browser_shared` 的关窗契约）。**选择器是数据不是代码**：读定义全在 `platforms/<key>.yaml` 的 `reads:` 下（`item`/`markers`/`fields`，字段名就是交给本体的事实契约），加页面 = 加数据；`_browser_eval` 只负责经 `browser_evaluate` 在共享窗口上取结果，**不自建 CDP 客户端** —— 同一个窗口挂两个驱动源，谁的状态新、谁负责导航会立刻说不清，而「说不清」在这个场景里就等于给出错的价。**刻意不推断**：券能不能用在这单上、和国补怎么叠加、到手多少全在本体侧，返回的 `note` 会把这条线再说一遍。 |
 | `saving_calc` (`saving_calc.py` + `_offer_engine.py`) | **通用优惠计算引擎的入口** —— 满减 / 立减 / 折扣 / 封顶 / 门槛 / 阶梯 / 比例补贴 / 叠加，**只做一个引擎，各场景只是"填规则"**（《省钱场景交接》§4 第一条）。**规则数据化，两个来源进同一个引擎**：① 固定的传 `card="guobu-2026"`，参数从 `fact-cards/` 读出来**适配**成规则（**不再抄一份比例/上限** —— 抄两份就是 §7 坑 1「参数两处重复」）；② 碎片化的（地方券/平台券）由模型查完页面**当场整理成 JSON** 传 `rules_json`，按 §4「资料卡只建稳定的」与 §7 坑 4 **不建全量库**。**规则形状**：必填 `id`/`类型`；`满减`(门槛+面额) / `立减`(面额) / `折扣`(付多少, 0.95=95折, +封顶) / `比例补贴`(比例, +封顶) / `阶梯`(档位, 取满足的最高档)；通用可选 `适用品类` `适用城市` `有效期` `可叠加` `前提`(`[{字段, 在/不高于/不低于, 说明}]`) `来源` `核验于`。**引擎不认识具体政策，也不认识品类枚举** —— 归一在输入层（`match_category` / `_norm_energy`），引擎只做字面判定。返回 `可用` / **`不可用`（每条都带原因，可直接拿去跟用户解释）** / `方案`(按共减排序) / `最优` / `口径标签` / `假设`。三件刻意不做：**不判最终能不能核销**（以下单结算页为准）；**不猜叠加顺序**（v1 一律按原结算价各自算再相加，写进 `假设`，因为「顺序由谁定」是 §5 第 3 步的开放问题）；**不整体失败**（某条规则不满足就判它不可用并说原因，而不是让整个调用 `ok=false` —— 那样模型只能自己编一句解释）。**本体接缝**：返回的 `engine` 字段标明这次谁在算（今天 `local-rules`），本体接上后换实现、出入参形状不变。**通用性由回归钉住**：引擎算出的国补补贴/到手价必须与已上线的 `subsidy_calc` 逐例相等。 |
+
+| `voucher_clues` (`voucher_clues.py` + `_voucher_sources.py` + `sources/voucher-sources.yaml`) | **地方消费券（A2）的线索层** —— 回答「某市现在有什么券」。**只给线索，不给结论**：返回的是「有哪些页面」（标题 / 日期 / 链接），面额 / 门槛 / 适用范围 / 有效期必须打开原文才知道 —— 从标题反推「满500减50」正是最容易编出来的地方，所以本工具**不猜、不提取**。**日期是承重的**：实测合肥专题页最新一条是 2026-04-24 而当时已是 2026-09，不带日期地返回 48 条会让模型把 2024 年的电影券当成现行的，所以每条都带 `date` / `age_days` / `freshness`（`current` 30 天内 / `recent` 180 天内 / `stale` 更早 / **`undated` 单独一档 —— 没日期不等于新**），按时间倒序且**没日期的排最后**。`category` 是对**标题**的关键词过滤（不是语义判断），所以同时返回 `totals.parsed` 与 `matched`，让人看得见滤掉了多少。**抓不到就说抓不到**：券源站点会**拼图风控**（实测同批城市一半被挡），命中即 `blocked` 并停下告知用户（**不重试、不换城市代码硬试**，与 `saving_login(blocked)` 同一范式）；取不到 → `source_unreachable`；城市不在表里 → `unknown_city`。**刻意不做检索降级**（不内置 bing/ddg）：那些通道实测不稳（同一查询两次，一次 10 条一次 0 条），且在 `review_search` 里已有一份实现 —— 抓不到时把地址交回给 agent，让它用自己的 `web_search` / `web_fetch` / 浏览器去补。`ok=false` 一律**不带** `clues` 字段：空的线索列表会被当成「这个城市没有券」。**不判「能不能用」** —— 那是本体的事。 |
 | `profile_update` | Manually update the workspace-local topic-aware learner profile; successful `finish_reason="stop"` turns are aggregated automatically by `system_after_turn`. Only per-topic dimensions and statistics are persisted, not raw transcripts. This profile is keyed by workspace, not by channel user identity. |
 | `bash` | Shell commands (anyio, Windows-aware bash detection). On Windows the installer bundles MSYS2 at `{app}\msys64`, added to PATH by the launcher, so bash works out-of-the-box. **cwd = workspace**. |
 | `powershell` | Windows-native shell. **默认 cwd = workspace**. |
