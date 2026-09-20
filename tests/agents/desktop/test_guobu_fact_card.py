@@ -32,8 +32,9 @@ import yaml
 # 工具之间与测试都用裸名 import; 而 ty 不认那个运行时插入, 只能按包路径解析。
 # 与 ``test_fusion_memory_tools.py`` 同一套写法。
 if TYPE_CHECKING:
-    from agents.desktop.tools import _fact_cards, _guobu_categories, policy_query, subsidy_calc
+    from agents.desktop.tools import _category_enum, _fact_cards, _guobu_categories, policy_query, subsidy_calc
 else:
+    import _category_enum
     import _fact_cards
     import _guobu_categories
     import policy_query
@@ -43,6 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKSPACE_ROOT = REPO_ROOT / "agents" / "desktop"
 TOOLS_DIR = WORKSPACE_ROOT / "tools"
 CARD_PATH = WORKSPACE_ROOT / "fact-cards" / "guobu-2026.yaml"
+ENUM_PATH = WORKSPACE_ROOT / "sources" / "category-enum.yaml"
 
 # 迁移前两个工具各自持有的政策字面量。它们现在只该出现在资料卡里。
 # 只写浮点: Python 里 ``1500 in {1500.0}`` 为真, 所以整数字面量也一并被抓住。
@@ -97,12 +99,17 @@ def test_card_loads_and_declares_its_own_freshness() -> None:
 
 
 def test_alias_table_covers_exactly_the_card_categories() -> None:
-    """别名表的键必须与卡里的品类一一对应, 少一个多一个都失败。
+    """归一用的品类集合必须与卡里的品类一一对应, 少一个多一个都失败。
 
-    这是「品类清单在卡里、别名在代码里」这条分工的接缝: 任何一边单独加品类都会被
+    这是「品类清单在卡里、别名在枚举里」这条分工的接缝: 任何一边单独加品类都会被
     这条挡住, 而不是等到线上映射不出品类才发现。
+
+    切换运行时来源之前, 这句问的是 ``set(_guobu_categories.ALIASES) == set(_card()["categories"])``;
+    那份硬编码的别名表已经删了 (别名只住在 ``sources/category-enum.yaml``), 于是同一句话
+    改问枚举的国补子集 —— **判据的强度没变, 变的是它问谁**。
     """
-    assert set(_guobu_categories.ALIASES) == set(_card()["categories"])
+    enum = yaml.safe_load(ENUM_PATH.read_text(encoding="utf-8"))
+    assert set(_category_enum.scenario_ids(enum, "guobu")) == set(_card()["categories"])
 
 
 def test_every_category_points_at_a_defined_tier() -> None:

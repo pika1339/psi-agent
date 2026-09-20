@@ -9,7 +9,7 @@
 #
 # 结构：
 #   tiers       档位 = 一套规则参数（机器值 + 对外展示措辞）
-#   categories  品类 -> 档位；只登记机器侧认得的键，别名映射在 _guobu_categories.py
+#   categories  品类 -> 档位；只登记机器侧认得的键，别名映射在 sources/category-enum.yaml
 #   labels      对外话术里的口径标签
 #   notes       各类话术模板
 
