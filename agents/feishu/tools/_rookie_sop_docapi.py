@@ -15,10 +15,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+import _feishu_impl as _f
 import _rookie_sop_doc as _doc
 
 _MAX_BLOCKS_PER_CALL = 50
@@ -219,10 +222,10 @@ async def subscribe_changes(api: Any, document_id: str) -> dict[str, Any]:
 
 
 def _tracked_children(children: list[dict[str, Any]]) -> list[tuple[int, str]]:
-    """筛出 children 里的 todo/表格块, 保持出现顺序 —— 用来跟 slots 按位配对。
+    """筛出 children 里的 todo/小计/图片块, 保持出现顺序 —— 用来跟 slots 按位配对。
 
     与 append_blocks 里收集 todo_block_ids/table_block_ids 同一份 children,
-    但这里要保序: 一个 slot 项对应「一个 todo」或「一个表格」, 顺序错了配对就全错。
+    但这里要保序: 一个 slot 项对应「一个 todo」或「一个小计」或「一个图片」, 顺序错了配对就全错。
     """
     out: list[tuple[int, str]] = []
     for child in children:
@@ -230,10 +233,11 @@ def _tracked_children(children: list[dict[str, Any]]) -> list[tuple[int, str]]:
             continue
         block_type = child.get("block_type")
         bid = str(child.get("block_id") or "")
-        # 跟踪两类块: todo(可勾选条目) 与 heading2(分节小计「到岗准备 3/5」)。
+        # 跟踪三类块: todo(可勾选条目)、heading2(分节小计「到岗准备 3/5」)、
+        # image(流程图占位, 配对后上传 PNG 并 replace_image)。
         # 小计块也要进映射, 否则同步后没法把它改成最新值 —— 用户勾完会看到条目
         # 划掉了、分节标题却还停在 0/5。
-        if bid and block_type in (_doc.BLOCK_TODO, _doc.BLOCK_HEADING2):
+        if bid and block_type in (_doc.BLOCK_TODO, _doc.BLOCK_HEADING2, _doc.BLOCK_IMAGE):
             out.append((block_type, bid))
     return out
 
@@ -261,26 +265,32 @@ async def update_tallies(
         if not module_rows:
             continue
         done_n = sum(1 for r in module_rows if str(r.get("状态") or "") == "已完成")
+        # 读回原块, 只换第 2 个 run(角标)—— V4 的标题块后面还挂着「验收人」runs,
+        # 整块重写会把验收人冲掉; 读不回时才退回旧版两 run 重写。
+        fetched = _parsed(await api("GET", f"/open-apis/docx/v1/documents/{document_id}/blocks/{bid}"))
+        block = (fetched.get("data") or {}).get("block") if isinstance(fetched, dict) else None
+        if not isinstance(block, dict):
+            # 读不回原块就跳过这个标题 —— 宁可不更新角标, 也不能用兜底 emoji 重写标题:
+            # 新模板的模块名不在旧 emoji 表里, 重写会把 🌟/🏃 写成 ▸(实测踩过)。
+            failures.append(f"{module}: read block failed, tally skipped")
+            continue
+        else:
+            elements = list((block.get("heading2") or {}).get("elements") or [])
+            if len(elements) >= 2 and isinstance(elements[1], dict):
+                elements[1] = {
+                    "text_run": {
+                        "content": f"\u3000{done_n}/{len(module_rows)}",
+                        "text_element_style": {"text_color": 5},
+                    }
+                }
+            else:
+                failures.append(f"{module}: heading2 elements 意外结构")
+                continue
         res = _parsed(
             await api(
                 "PATCH",
                 f"/open-apis/docx/v1/documents/{document_id}/blocks/{bid}",
-                body_json=json.dumps(
-                    {
-                        "update_text_elements": {
-                            "elements": [
-                                {"text_run": {"content": f"{_doc.module_emoji(module)} {module}"}},
-                                {
-                                    "text_run": {
-                                        "content": f"\u3000{done_n}/{len(module_rows)}",
-                                        "text_element_style": {"text_color": 5},
-                                    }
-                                },
-                            ]
-                        }
-                    },
-                    ensure_ascii=False,
-                ),
+                body_json=json.dumps({"update_text_elements": {"elements": elements}}, ensure_ascii=False),
             )
         )
         if res.get("ok") is True:
@@ -300,6 +310,8 @@ async def provision_doc(
     name: str,
     rows: list[dict[str, Any]],
     sop_url: str = "",
+    cfg: dict[str, Any] | None = None,
+    image_path: str = "",
 ) -> dict[str, Any]:
     """为一个新人备好详情页: 建文档 → 写清单 → 授权给他 → 订阅变更。
 
@@ -324,7 +336,7 @@ async def provision_doc(
         return created
     document_id = str(created["document_id"])
 
-    blocks, slots = _doc.build_doc_blocks(rows, name=name, sop_url=sop_url)
+    blocks, slots = _doc.build_doc_blocks(rows, name=name, sop_url=sop_url, cfg=cfg)
     appended = await append_blocks(api, document_id, blocks)
     if appended.get("ok") is not True:
         return {"ok": False, "error": f"blocks: {appended.get('error')}", "document_id": document_id}
@@ -342,8 +354,14 @@ async def provision_doc(
     #   其余       → todo(可勾选的条目)
     # 类型不符就报错而不是硬配 —— 映射错位会把勾选写到别的条目上。
     block_map: dict[str, str] = {}
+    image_block_ids: list[str] = []
     for (block_type, bid), (item_id, role) in zip(tracked, slots, strict=True):
-        expected = _doc.BLOCK_HEADING2 if role == _doc.ROLE_TALLY else _doc.BLOCK_TODO
+        if role == _doc.ROLE_IMAGE:
+            expected = _doc.BLOCK_IMAGE
+        elif role == _doc.ROLE_TALLY:
+            expected = _doc.BLOCK_HEADING2
+        else:
+            expected = _doc.BLOCK_TODO
         if block_type != expected:
             return {
                 "ok": False,
@@ -351,10 +369,40 @@ async def provision_doc(
                 "document_id": document_id,
             }
         block_map[bid] = f"{item_id}:{role}"
+        if role == _doc.ROLE_IMAGE:
+            image_block_ids.append(bid)
+
+    # 流程图图片: 建文档时只放了空 image 块占位, 这里把 PNG 传进块里。
+    # 三步舞蹈: upload_all(绑定块) → replace_image(块开始显示图片)。
+    # 用 tenant 身份 —— 发卡链路全程 bot 身份, 没有用户授权可用。
+    image_note = ""
+    if image_path and image_block_ids:
+        data = await anyio.Path(Path(image_path)).read_bytes()
+        for image_bid in image_block_ids:
+            try:
+                up = await _f._invoke(
+                    _f._build_media_upload_all_request(
+                        Path(image_path).name, "docx_image", image_bid, len(data), data, None
+                    ),
+                    prefer="tenant",
+                )
+                if not up.get("ok"):
+                    image_note = f"image upload failed: {up.get('error') or up.get('message')}"
+                    continue
+                token = str(((up.get("data") or {}).get("file_token")) or "")
+                if not token:
+                    image_note = "image upload succeeded but returned no file_token"
+                    continue
+                patched = await _f._invoke(
+                    _f._build_image_block_patch_request(document_id, image_bid, token), prefer="tenant"
+                )
+                image_note = "image uploaded" if patched.get("ok") else f"replace_image failed: {patched.get('error')}"
+            except Exception as exc:  # 图片失败不该让整个发卡失败
+                image_note = f"image upload failed: {exc!r}"
 
     granted = await grant_edit(api, document_id, open_id)
     subscribed = await subscribe_changes(api, document_id)
-    return {
+    out: dict[str, Any] = {
         "ok": granted.get("ok") is True and subscribed.get("ok") is True,
         "document_id": document_id,
         # 用飞书给的真实链接(带租户域名), 不用硬编码的通用域名
@@ -366,3 +414,6 @@ async def provision_doc(
         "subscribed": subscribed.get("ok") is True,
         "subscribe_error": subscribed.get("error", ""),
     }
+    if image_note:
+        out["image"] = image_note
+    return out
