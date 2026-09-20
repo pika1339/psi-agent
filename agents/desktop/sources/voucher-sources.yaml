@@ -38,6 +38,7 @@ search:
   tier: search
   query_templates:
     - "{city} 消费券"
+    - "{city} 消费券 领取入口"
     - "{city} {category} 消费券"
   notes: >-
     检索是主路径, 不是兜底。实测同一时刻, **西安 / 广州 / 天津**三城在聚合站那条路上
@@ -65,6 +66,39 @@ official:
       - "详情页实测（青岛「2026礼惠金秋」新车消费补贴）：新能源购车价 4% 最高 1.2 万, 燃油 3% 最高 1 万, 先到先得, **不与本市汽车以旧换新叠加**"
     gives: 活动线索 + 部分规则原文 + 地区 / 主办单位
     coverage: 全国**跨城市**；但不保证每个城市都有（实测合肥本期 0 条, 安徽 2 条）
+
+    # 逐城核对结果, 核于 2026-09-18。
+    #
+    # **只收「真的有稳定栏目」的**: 实测页面要落在具名栏目目录下(/xwdt/tzgg/、/zwxx/、
+    # /zwgk/、/gggs/ 这类), 且该栏目近期仍在更新。只发过一篇消费券文章的站**不算渠道** ——
+    # 那交给联网检索就行, 写进表里只会在过期后误导人。
+    #
+    # 核对下来各城市消费券的官方信息大多是**散落的单篇文章**(大量 2020/2023/2024/2025 的旧文),
+    # 所以这张表很短, 而且这本身就是结论: **检索才是主力, 渠道表只兜住少数几个真有的**。
+    #
+    # 另: 地方券大量是**区级**发放(重庆三个区、北京东城/房山、南京雨花台、广州番禺),
+    # 所以「按城市找入口」这个前提本身就偏 —— 这也是检索更合适的原因之一。
+    city_domains:
+      - {city: "武汉", host: "sw.wuhan.gov.cn", channel: "通知公告(/xwdt/tzgg/)", latest: "2026-09-16", mentions: 35}
+      - {city: "北京", host: "sw.beijing.gov.cn", channel: "政策文件(/zwxx/2024zcwj/)", latest: "2026-02", mentions: 1}
+      - {city: "重庆", host: "www.wz.gov.cn", channel: "公告公示(/zwxx/gggs/)", latest: "2026-08-27", mentions: 42}
+      - {city: "重庆", host: "www.ddk.gov.cn", channel: "公示公告(/zwxx/gsgg/)", latest: "2026-09-07", mentions: 29}
+      - {city: "重庆", host: "www.cqstl.gov.cn", channel: "政府信息公开(/zwgk/.../qtgknr/)", latest: "2026-09-08", mentions: 18}
+
+    # 核对过但**不收**的, 连同理由记下, 免得重复探:
+    not_a_channel:
+      - {city: "上海", host: "www.shanghai.gov.cn", why: "只验证到单篇(不透明路径 nw31406), 内容停在 2025-02"}
+      - {city: "广州", host: "www.gz.gov.cn", why: "只验证到单篇(/content/post_), 停在 2025-03"}
+      - {city: "广州", host: "www.panyu.gov.cn", why: "只验证到单篇, 停在 2024-12"}
+      - {city: "杭州", host: "www.hzzx.gov.cn", why: "只验证到单篇, 且是政协站不是主管部门"}
+      - {city: "南京", host: "www.nanjing.gov.cn", why: "只验证到单篇, 停在 2023"}
+      - {city: "合肥", host: "commerce.ah.gov.cn", why: "只验证到单篇(2024 专题), 停在 2024-11"}
+      - {city: "天津", host: "www.teda.gov.cn", why: "只验证到单篇(不透明路径), 停在 2025-08"}
+      - {city: "深圳", host: "-", why: "0/4 站点层抓取失败, 未取证"}
+      - {city: "成都", host: "-", why: "0/3 未取证"}
+      - {city: "西安", host: "-", why: "没搜到政府域名候选"}
+
+
     notes: >-
       权威、更新到当天, 而且是**跨城市**的 —— 目前唯一一个国家级官方入口。
       但它讲的是「活动」而不是「领券入口」, 所以拿到条目仍要打开原文确认

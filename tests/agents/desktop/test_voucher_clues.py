@@ -526,3 +526,62 @@ async def test_a_non_json_search_result_is_reported_not_guessed(page: Any, fake_
     data = await _call(city="合肥")
     assert data["paths"]["search"]["ok"] is False
     assert "JSON" in data["paths"]["search"]["note"]
+
+
+# --------------------------------------------------------------------------- #
+# 8. 官方列表: 省级条目不能因为"问的是城市"就看不见
+# --------------------------------------------------------------------------- #
+
+#: 官方列表是**全国**的, 省级活动常写成「安徽省…」。按城市名过滤会把它们漏掉,
+#: 而省级活动通常正好覆盖省会 —— 实测: 只给「合肥」0 条, 加上「安徽省」1 条。
+_OFFICIAL_PAGE = (
+    "<html><body><ul>"
+    '<li><a href="/news/123/2026/9/a.html">安徽省铜陵市启动金秋消费季活动 2026-08-31</a></li>'
+    '<li><a href="/news/123/2026/9/b.html">河南有奖发票活动全省推广 2026-09-18</a></li>'
+    '<li><a href="/news/123/2026/9/c.html">合肥市发放新一轮消费券 2026-09-10</a></li>'
+    "</ul></body></html>"
+)
+
+
+async def test_official_list_matches_the_province_too(page: Any) -> None:
+    page(_OFFICIAL_PAGE)
+    entry = {"list_url": "https://example.gov.cn/saleinfo/page{n}.html", "host_url": "https://example.gov.cn"}
+
+    only_city = await _voucher_clues._official_clues(entry, "合肥", "", 1, TODAY)
+    assert [c["title"] for c in only_city] == ["合肥市发放新一轮消费券"]
+
+    with_province = await _voucher_clues._official_clues(entry, "合肥", "安徽省", 1, TODAY)
+    titles = [c["title"] for c in with_province]
+    assert "安徽省铜陵市启动金秋消费季活动" in titles, titles
+    assert "河南有奖发票活动全省推广" not in titles, "别的省不该被匹配进来"
+    assert len(titles) == 2
+
+
+async def test_search_runs_every_template_not_just_the_first_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """地方券波动大, 一条查询召回不够 —— 实测窄查询常一条不给而宽查询有, 反过来也有。
+
+    所以模板要**跑满再合并**, 不是"第一个有结果就停"。这条用两个模板各给一条来钉住。
+    """
+    calls: list[str] = []
+
+    async def _fake(*, q: str, num: str = "10", **_kw: Any) -> str:
+        calls.append(q)
+        payload = {
+            "organic": [
+                {
+                    "title": f"{q} 的结果条目",
+                    "link": f"https://example.gov.cn/{len(calls)}.html",
+                    "date": "Sep 10, 2026",
+                }
+            ]
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    # 用 monkeypatch **按字符串名**设: `serper_google_search` 是 @mcp 装饰器在 import 时
+    # 注入到 search 模块上的, 静态分析看不到它, 直接赋值/删除会被 ty 判成 unresolved-attribute。
+    monkeypatch.setattr(_voucher_clues.web_search, "serper_google_search", _fake)
+    got, why = await _voucher_clues._search_clues("合肥", "餐饮", ["{city} 消费券", "{city} {category} 消费券"])
+
+    assert len(calls) == 2, f"两个模板都该跑, 实际: {calls}"
+    assert len(got) == 2, "两个模板的结果都要合并进来"
+    assert why == ""

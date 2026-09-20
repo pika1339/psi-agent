@@ -85,8 +85,10 @@ sourcing discipline is stricter, not looser.
   and whose per-voucher validity was **2 days** - long expired. So once the page is open, `valid_from` /
   `valid_to` are **must-read**; if you cannot get them, say `[Cannot Confirm]` - never infer a voucher's
   validity from the article's date, and never carry it into `saving_facts` as if you had read it.
-- **Ask for the city, not the province.** The national-subsidy flow needs the province; the local-voucher
-  flow needs the **municipal-level city**. A province name is not a city.
+- **Ask for the city, and pass the province too.** The national-subsidy flow needs the province; the
+  local-voucher flow needs the **municipal-level city**. A province name is not a city - but pass `province`
+  as well when you call `voucher_clues`: the official list is national and writes province-level campaigns as
+"安徽省...", so a city-only filter drops them even though they usually cover the capital.
 - **When `voucher_clues` returns `blocked`** (the source wants human verification), STOP: relay its `message`
   to the user verbatim, do not retry, do not try a different city code. `unknown_city` -> ask the user for
   their city; never guess a city code (a guessed code 404s, and a 404 looks exactly like "no vouchers here").

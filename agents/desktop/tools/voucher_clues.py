@@ -288,20 +288,34 @@ async def _search_clues(city: str, category: str, templates: list[str]) -> tuple
     today = date.today()
     found: list[dict[str, Any]] = []
     seen: set[str] = set()
+    # **把每个模板都跑一遍再合并**, 不是"第一个有结果就停"。
+    # 地方券波动大, 一条查询的召回不够 —— 实测窄查询(带品类)常常一条都不给, 而宽查询
+    # (城市 + 消费券)才有; 反过来也有。只跑一条等于把另一半漏掉, 而搜索正是那条兜底的路。
+    tried = 0
     for template in templates:
         query = str(template).format(city=city, category=category).strip()
-        if not query:
+        if not query or any(query == str(x).format(city=city, category=category).strip() for x in templates[:tried]):
+            tried += 1
             continue
+        tried += 1
         try:
             raw = await fn(q=query, num="10")
         except Exception as exc:
+            if found:
+                break
             return [], f"通用搜索调用失败: {type(exc).__name__}: {exc}"
         text = str(raw)
         if text.startswith("Error: ") or "API_KEY is empty" in text:
+            if found:
+                break
             return [], f"通用搜索不可用: {text.strip()[:140]}"
         try:
             data = json.loads(text)
         except ValueError:
+            # 非 JSON 说明返回不是搜索结果(错误页之类)。已经拿到东西就继续下一条模板,
+            # 什么都没拿到就**如实说**, 不要静默跳过让调用方以为是"没结果"。
+            if found:
+                continue
             return [], "通用搜索返回的不是 JSON, 无法解析"
 
         rows: list[dict[str, Any]] = []
@@ -321,8 +335,6 @@ async def _search_clues(city: str, category: str, templates: list[str]) -> tuple
                     "via": "search",
                 }
             )
-        if found:
-            break
     return found, ("" if found else "检索没有返回可用条目")
 
 
@@ -333,16 +345,24 @@ async def _search_clues(city: str, category: str, templates: list[str]) -> tuple
 _OFFICIAL_LINK_RE = re.compile(r'href="([^"]*/news/123/[^"]*)"[^>]*>(.*?)</a>', re.S | re.I)
 
 
-async def _official_clues(entry: dict[str, Any], city: str, pages: int, today: date) -> list[dict[str, Any]]:
+async def _official_clues(
+    entry: dict[str, Any], city: str, province: str, pages: int, today: date
+) -> list[dict[str, Any]]:
     """抓官方列表的前 N 页, 按城市名过滤。
 
     官方列表是**全国**的, 所以"过滤后 0 条"是常态而不是异常 —— 调用方要看得出
     "这一路查过了, 只是这个城市本期没有", 而不是以为没查。
+
+    **同时匹配省名**: 官方条目里省级活动往往写成「安徽省…」, 只按城市名过滤会把它们漏掉,
+    而省级活动通常**正好覆盖省会**。省份由调用方给(模型知道合肥在安徽) —— 这里不手编
+    城市到省的映射, 那又是一份会过期的数据。
     """
     pattern = str(entry.get("list_url") or "")
     if "{n}" not in pattern:
         return []
     wanted = _sources.normalize_city(city)
+    province_norm = _sources.normalize_city(province) if province else ""
+    needles = [x for x in (wanted, province_norm) if x]
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for n in range(1, max(1, pages) + 1):
@@ -351,7 +371,7 @@ async def _official_clues(entry: dict[str, Any], city: str, pages: int, today: d
             break
         for m in _OFFICIAL_LINK_RE.finditer(page):
             href, inner = m.group(1), _strip_tags(m.group(2))
-            if wanted not in inner or len(inner) < 6 or href in seen:
+            if not any(n in inner for n in needles) or len(inner) < 6 or href in seen:
                 continue
             seen.add(href)
             date_match = _DATE_RE.search(inner)
@@ -379,6 +399,7 @@ async def _official_clues(entry: dict[str, Any], city: str, pages: int, today: d
 async def voucher_clues(
     city: str,
     category: str = "",
+    province: str = "",
     max_results: int = 20,
     return_json: bool = True,
 ) -> str:
@@ -386,6 +407,8 @@ async def voucher_clues(
 
     city: 城市名(合肥 / 合肥市)。按城市组织, 省份名(安徽)不在表里。
     category: 可选。对**标题**做关键词过滤(如 汽车 / 餐饮 / 家电)。
+    province: 可选, 但**建议给**。官方列表里省级活动常写成「安徽省…」, 只按城市名
+              过滤会漏掉它们 —— 而省级活动通常正好覆盖省会。给上省份就能一并匹配。
               这是关键词匹配, 不是语义判断 —— 返回里带 `totals.parsed` 与匹配数, 好让你知道滤掉了多少。
     max_results: 最多返回多少条(默认 20, 已按时间倒序)。
     return_json: 默认返回 JSON 文本。
@@ -445,7 +468,9 @@ async def voucher_clues(
     if official_entry is None:
         paths["official"] = {"ok": False, "count": 0, "note": "注册表里没有官方入口定义"}
     else:
-        official_clues = await _official_clues(official_entry, city, int(official_entry.get("pages") or 2), today)
+        official_clues = await _official_clues(
+            official_entry, city, province, int(official_entry.get("pages") or 2), today
+        )
         paths["official"] = {
             "ok": bool(official_clues),
             "count": len(official_clues),
