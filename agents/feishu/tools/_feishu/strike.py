@@ -209,9 +209,7 @@ def _run_is_struck(run_xml: str) -> bool:
     if not sm:
         return False
     tag = sm.group(0)
-    if re.search(r'val="(false|0)"', tag):
-        return False
-    return True
+    return not re.search(r'val="(false|0)"', tag)
 
 
 def _xml_unescape(text: str) -> str:
