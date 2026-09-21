@@ -193,10 +193,29 @@ def _apply(
         prefix = name + "_"
     g = sys._getframe(depth).f_globals
     prepend = func.__doc__
+    host = g.get("__name__") or getattr(func, "__module__", "")
+
+    def _publish(tool_name: str, built: Any) -> None:
+        """Publish *built* into the host module, claiming that module as its home.
+
+        The registry scans ``dir(module)`` but keeps only attributes whose ``__module__``
+        equals the module it is scanning (``ToolRegistry._exec_tool_files``) — that guard
+        exists to skip imported names like ``json`` / ``logger``. We build these callables
+        here in ``_mcp``, so their ``__module__`` is ``_mcp`` and **every** MCP tool would
+        be dropped silently: present in ``dir(module)``, absent from the tool table, with no
+        warning. Stamp the host module name on so they survive the scan.
+
+        Measured before this fix: ``search.py`` / ``browser.py`` contributed 0 tools each
+        (``serper_google_search`` and all six ``browser_*`` were missing from a 95-tool
+        registry), while non-MCP tools in the same pack loaded fine.
+        """
+        if host:
+            built.__module__ = host
+        g[tool_name] = built
 
     if not dispatch:
         for tool_name, schema in schemas.items():
-            g[prefix + tool_name] = _build(prefix + tool_name, schema, config_provider, prepend)
+            _publish(prefix + tool_name, _build(prefix + tool_name, schema, config_provider, prepend))
         return func
 
     # Dispatch mode: one generic entrypoint, plus the explicitly kept tools.
@@ -208,9 +227,9 @@ def _apply(
     kept = 0
     for tool_name, schema in schemas.items():
         if prefix + tool_name in keep or tool_name in keep:
-            g[prefix + tool_name] = _build(prefix + tool_name, schema, config_provider, prepend)
+            _publish(prefix + tool_name, _build(prefix + tool_name, schema, config_provider, prepend))
             kept += 1
-    g[name + "_call"] = _build_dispatch(name, prefix, schemas, config_provider, prepend)
+    _publish(name + "_call", _build_dispatch(name, prefix, schemas, config_provider, prepend))
     logger.debug(f"MCP {name!r} in dispatch mode: 1 dispatcher + {kept} kept of {len(schemas)} tool(s)")
     return func
 
