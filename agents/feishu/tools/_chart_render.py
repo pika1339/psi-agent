@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from contextvars import ContextVar
 from itertools import pairwise
 from math import ceil, radians, sin, sqrt
@@ -1202,6 +1203,40 @@ def _colors(n: int) -> list[str]:
     return [PALETTE[i % len(PALETTE)] for i in range(n)]
 
 
+def _resolve_colors(
+    override: Sequence[str] | None,
+    n: int,
+    *,
+    expected: int | None = None,
+) -> list[str]:
+    """Colours for ``n`` series: the caller's list when given, else the house palette.
+
+    ``override`` exists because the palette's order is arbitrary relative to *meaning*,
+    and some meanings are conventionally coloured — 正面绿 / 负面红 is the case that
+    forced this. Without it a caller can only choose *which* palette slot a series lands
+    in, so "green for positive, red for negative" is expressible only by counting palette
+    positions, which breaks silently the moment a series is added or reordered.
+
+    ``expected`` is the count the override must match: usually ``n``, but a single-series
+    bar chart colours each *bar* rather than each series and passes ``len(cats)``.
+    A mismatch raises instead of padding — a short list would fall back to palette
+    colours for the tail, which is the exact confusion this parameter exists to remove.
+    """
+    if override is None:
+        return _colors(n)
+    if not override:
+        raise ChartDataError("colors must not be empty when given.")
+    if expected is not None and len(override) != expected:
+        raise ChartDataError(f"expected {expected} colors, got {len(override)}.")
+    return list(override)
+
+
+#: Draw functions that accept ``colors``. Callers that expose a colour option (the
+#: ``write_word`` chart block) check membership here rather than hardcoding the list,
+#: so this stays the single place that answer lives.
+_COLOR_KINDS = frozenset({"line", "area", "stacked_area", "column", "bar", "grouped_column", "stacked_column"})
+
+
 # ── Part-of-whole: pie, donut, funnel ──────────────────────────────────────────
 # A pie only works when slices are few and differ visibly. Past ~6 slices the small
 # ones become unreadable slivers with colliding labels, so we fold the tail into
@@ -1489,6 +1524,7 @@ def draw_line(
     smooth_area: bool = False,
     annotate_last: bool = True,
     zero_baseline: bool = False,
+    colors: Sequence[str] | None = None,
     source: str = "",
 ) -> Any:
     """Return a ``draw`` for a line chart (optionally filled as an area chart).
@@ -1498,9 +1534,12 @@ def draw_line(
     (not forced to zero) so real variation isn't flattened into a straight line —
     ``zero_baseline`` opts into the honest-magnitude framing when the absolute level
     matters more than the change.
+
+    ``colors`` overrides the palette **by series order** — pass one colour per series
+    when the series carry a conventional colour (正面/负面, 实际/目标).
     """
     check_series_length(series, labels)
-    colors = _colors(len(series))
+    colors = _resolve_colors(colors, len(series), expected=len(series))
 
     def draw(fig: Any, ax: Any) -> None:
         for (name, values), color in zip(series, colors, strict=True):
@@ -1544,6 +1583,7 @@ def draw_stacked_area(
     y_label: str = "",
     unit: str = "",
     percent: bool = False,
+    colors: Sequence[str] | None = None,
     source: str = "",
 ) -> Any:
     """Return a ``draw`` for a stacked area chart — composition changing over time.
@@ -1552,11 +1592,13 @@ def draw_stacked_area(
     shift" independently of whether the total grew. Absolute stacking answers "how did
     the total grow, and who contributed". They're different questions; the flag keeps
     both available from one tool.
+
+    ``colors`` overrides the palette **by series order** (bottom band first).
     """
     check_series_length(series, labels)
     if any(v < 0 for _n, values in series for v in values):
         raise ChartDataError("stacked areas can't show negative values — use a line chart instead.")
-    colors = _colors(len(series))
+    colors = _resolve_colors(colors, len(series), expected=len(series))
     stacks = [values for _name, values in series]
     names = [name for name, _values in series]
     if percent:
@@ -1603,6 +1645,7 @@ def draw_bar(
     percent: bool = False,
     sort_desc: bool = False,
     highlight: int = -1,
+    colors: Sequence[str] | None = None,
     source: str = "",
 ) -> Any:
     """Return a ``draw`` for column/bar charts — single, grouped, or stacked.
@@ -1613,6 +1656,9 @@ def draw_bar(
     is the whole point of a bar chart). ``horizontal`` is the right call for long
     category names or many categories — vertical labels turn into unreadable
     diagonals past ~8 items.
+
+    ``colors`` overrides the palette **by series** (one per series, not per bar); it is
+    ignored by ``highlight``, which greys everything except the bar under discussion.
     """
     check_series_length(series, labels)
     if stacked and any(v < 0 for _n, values in series for v in values):
@@ -1642,7 +1688,7 @@ def draw_bar(
             raise ChartDataError("every category must total more than 0 to show a 100% composition.")
         stacks = [[v / totals[i] * 100 for i, v in enumerate(values)] for values in stacks]
 
-    colors = _colors(len(stacks))
+    colors = _resolve_colors(colors, len(stacks), expected=len(stacks))
     if len(stacks) == 1 and 0 <= highlight < len(cats):
         # Single series: grey everything except the bar under discussion, so the eye
         # lands on it without a legend or an arrow.

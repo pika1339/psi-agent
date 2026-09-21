@@ -693,6 +693,9 @@ feishu_auth_request(user_key=<sender_open_id>, capabilities=<工具给的 need_c
     `feishu_chart_figure`。`document_id` 留空就只出 PNG（返回 `image_path`），可拿去塞进 Word/PPT 或
     `[SEND:]` 发给用户。图注**自动按文档里已有的序号续「图 N」**，别自己写编号。返回里带 `warning`
     说明本机缺中文字体、中文会变方框，**要如实告诉用户**，别报成功了事。
+    **但「报告里的图」不走这个工具**：Word 报告的图用 `write_word` 的
+    `{"type":"chart","kind":"line","data":{...}}` 块，同一条渲染管线、图直接嵌进 .docx。在这里渲一张
+    PNG 再另写一份报告，等于一个需求交了两个东西，而报告指向的那张图用户根本收不到。
 27. **飞书没有专用工具的接口**：用 `feishu_api(method, uri, body_json, query_json, paths_json, prefer, ...)`
     直接打任意开放平台端点。它走的是和专用工具**同一条 `_invoke`**，所以鉴权、tenant→user 令牌降级、
     429 重试、错误码 `hint` 全都照旧。**端点清单在 `feishu-api` 技能里**（通讯录 / 考勤 / 云文档搜索 /

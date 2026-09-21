@@ -69,6 +69,9 @@ read_document
 read_pdf
 write_word
 write_word_from_markdown
+# 出图入口。只在「要一张独立的图」时才用 —— 报告里的图走 write_word 的 chart 块,
+# 不在这里渲染成一张散图 (见 feishu_chart 的 description, 以及提示词里产出格式那一段)。
+feishu_chart
 
 # ── 会话与记忆 ───────────────────────────────────────────────────────────────
 session_keyword_search

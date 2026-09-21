@@ -1595,6 +1595,12 @@ async def feishu_chart(
     PNG and placed as a native image block. With *document_id* empty you get the PNG
     only — useful for embedding in Word/PPT or sending with ``[SEND:path]``.
 
+    **A chart that belongs inside a Word report does not go through here** — call
+    ``write_word`` with a ``{"type":"chart"}`` block instead, which renders through this
+    same pipeline and embeds the picture. Rendering a PNG here *and* writing a separate
+    .docx answers one request with two deliverables, and leaves the report pointing at an
+    image file the reader never receives.
+
     **Picking the right chart is the hard part** and this tool will not do it for you:
     read the ``feishu-charts`` skill, which maps the question being asked to a
     *chart_type* and states each one's preconditions. A wrong chart type renders
