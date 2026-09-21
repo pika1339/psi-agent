@@ -192,3 +192,58 @@ def test_session_management_tells_the_model_how_to_recall_an_elided_row() -> Non
     assert "[已省略" in guidance
     # Must not read as "the handle is the content".
     assert "句柄" in guidance
+
+
+def test_charting_is_the_agents_own_decision_not_the_users_ask() -> None:
+    """The requirement: decide to chart *yourself*, so documents stop being table dumps.
+
+    Measured on the 2026-09-21 正负面清单 report: every number went into a table and the
+    delivered .docx carried no visual at all. The prompt already said shaped data "belongs
+    in a chart", but framed it as tool *selection* — nothing said that choosing to chart is
+    the model's job, so it charted only when the user asked. This pins the stronger framing.
+    """
+    guidance = sections.DELIVERABLES_AS_FILES_SECTION
+
+    # the decision is delegated to the model, expressly without the user asking
+    assert "your call" in guidance
+    assert "the user should not have to ask" in guidance
+    # and it applies while writing a document, not only when a chart is requested
+    assert "would this read better as a picture?" in guidance
+
+
+def test_charting_guidance_says_when_not_to_chart() -> None:
+    """A blanket "always add charts" would produce decorative charts.
+
+    The guard is what makes the instruction safe to state strongly, so it is asserted as
+    hard as the requirement itself.
+    """
+    guidance = sections.DELIVERABLES_AS_FILES_SECTION
+
+    assert "**Shaped**" in guidance
+    assert "**Not shaped**" in guidance
+    assert "a table reads better" in guidance
+    assert "padding the document" in guidance
+
+
+def test_charting_guidance_names_the_type_and_colour_convention() -> None:
+    """Knowing *that* to chart is not enough; the prompt has to route the common cases.
+
+    Semantic colours are this incident's own subject — the agent needed 正面绿 / 负面红,
+    found no way to ask for it, and hand-rolled a matplotlib script that lost every layout
+    guard. Now that `colors` exists on the tool, the convention is stated here so it is
+    applied consistently rather than per-chart.
+    """
+    guidance = sections.DELIVERABLES_AS_FILES_SECTION
+
+    for chart_type in ("`line`", "`grouped_column`", "`donut`", "`radar`"):
+        assert chart_type in guidance, f"{chart_type} missing from the routing table"
+    assert "#34C724" in guidance and "#F5222D" in guidance
+    assert "consistent across them" in guidance
+
+
+def test_tools_md_tells_the_model_that_charting_is_its_decision() -> None:
+    """The prompt is not the only surface the model reads; TOOLS.md item 26 must agree."""
+    text = TOOLS_MD.read_text(encoding="utf-8")
+
+    assert "要不要出图是你自己判断" in text
+    assert "不该等用户开口" in text

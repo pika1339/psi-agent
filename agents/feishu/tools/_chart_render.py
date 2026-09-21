@@ -38,6 +38,7 @@ from math import ceil, radians, sin, sqrt
 from typing import Any
 
 import anyio
+from loguru import logger
 
 # ── House style ───────────────────────────────────────────────────────────────
 # A qualitative palette tuned for white-background business docs: distinct hues at
@@ -73,6 +74,27 @@ _DONUT_UNIT_GID = "psi-donut-unit"  # the "合计" caption under it
 # Rendered at 8x4.5in @ 200 DPI = 1600x900 px. Wide enough for a dense time axis,
 # 16:9 so it never dominates the page when Feishu scales it to column width.
 _FIG_W, _FIG_H, _DPI = 8.0, 4.5, 200
+
+# ── Content-aware canvas growth (row-labelled charts only) ──────────────────────
+# The base canvas above is the *floor*, not a cap: a chart with one labelled row per
+# category grows to fit them. See `_row_aware_size` for why height is generous and width
+# is not. All four numbers are in inches / points, so they scale with `_DPI`.
+#: Rows the canvas will grow to accommodate before type starts shrinking again.
+_MAX_ROWS = 40
+#: Row pitch: a 13pt line box plus breathing room, the same 1.45x factor the other
+#: label-fitting helpers use.
+_ROW_PITCH_IN = 13.0 * 1.45 / 72.0
+#: Non-data vertical furniture: figure title, legend strip, x-axis labels and its title.
+_TITLE_LEGEND_IN = 1.0
+_AXIS_IN = 0.6
+#: Caps. Height is cheap (the doc column scrolls); width is not (a wider PNG is scaled
+#: down harder on the page, shrinking every glyph).
+_MAX_H, _MAX_W = 20.0, 16.0
+#: Row-label point size used to estimate the gutter, and the padding around it.
+_LABEL_PT = 13.0
+_ROW_LABEL_PAD_IN = 0.22
+#: Gutter the base canvas already provides, measured off the 2026-09-21 chart (11.6%).
+_BASE_GUTTER_IN = 0.93
 
 # CJK families by platform, best first. matplotlib needs a family it can actually
 # find installed; a missing family degrades to DejaVu Sans and every Chinese glyph
@@ -724,6 +746,12 @@ def _row_label_size(ax: Any, rows: int, base: float = 11.0) -> float:
 
     Clamped at 6pt: below that the label is unreadable anyway, and the caller is better
     off having been told the chart has too many rows.
+
+    On a **horizontal** bar chart this is now the last resort rather than the first
+    response: ``_row_aware_size`` grows the canvas to fit the rows at full size, so the
+    type only shrinks when the row count exceeds ``_MAX_ROWS`` (the canvas cap). Say so in
+    the log, because "the type got small" and "there are 300 people" are the same picture
+    otherwise.
     """
     height = ax.get_window_extent().height
     if rows < 2 or height <= 0:
@@ -732,7 +760,70 @@ def _row_label_size(ax: Any, rows: int, base: float = 11.0) -> float:
     # A text line box runs ~1.35x its point size in pixels at this dpi; leave a little
     # air between rows on top of that.
     fits = pitch / (1.45 * (_DPI / 72.0))
-    return max(6.0, min(base, fits))
+    size = max(6.0, min(base, fits))
+    if size < base - 0.5:
+        logger.debug(f"row labels shrunk to {size:.1f}pt: {rows} rows exceed the canvas cap {_MAX_ROWS}")
+    return size
+
+
+def _row_aware_size(rows: int, longest_label: str, *, horizontal: bool) -> tuple[float, float]:
+    """Canvas size for a chart with one labelled row per category.
+
+    A fixed canvas cannot show many rows. Measured on the 2026-09-21 全员成长图: 38 people
+    in a 600px data band is 15.8px of pitch per row, while one 13pt CJK line box is 52px —
+    only ~11 rows can be labelled legibly. The renderer's old answer was to *drop* labels
+    via ``_thin_ticks``, so a 38-person chart silently showed about a dozen names.
+
+    So the canvas grows with the data. Two deliberate limits:
+
+    * **Height is generous (``_MAX_ROWS`` rows).** Feishu's doc column is a fixed width and
+      scrolls vertically, so a taller PNG costs the reader nothing; a taller chart is also
+      closer to the document's own shape than a squashed 16:9 strip.
+    * **Width grows only for the label gutter, ``_MAX_W``.** Feishu renders an image block
+      at the PNG's **own pixel size** (see the ``savefig.bbox`` note), so a *wider* canvas
+      is scaled *down* further on the page and every glyph gets smaller. Widening the plot
+      area would therefore make the chart harder to read, not easier — only the gutter is
+      allowed to grow, keeping plot widths comparable across charts.
+
+    ``rows <= 1`` returns the base size unchanged, so single-series charts (and every
+    non-row chart) keep the size the delivery path was tuned against.
+
+    **Vertical charts are excluded entirely.** Their categories sit on the x axis and are
+    labelled by ``_tilt_crowded_x_labels`` / ``_thin_ticks``, so they have no row pitch to
+    fix; growing a tall column chart's *height* to match its category count would buy
+    nothing and make the PNG needlessly large.
+    """
+    if rows <= 1 or not horizontal:
+        return _FIG_W, _FIG_H
+    if rows > _MAX_ROWS:
+        # Honour the cap and let `_row_label_size` shrink the type; the caller still gets
+        # every label, just smaller, which beats dropping rows.
+        logger.debug(
+            f"{rows} rows exceed the {_MAX_ROWS}-row canvas cap; type will shrink instead of the canvas growing"
+        )
+
+    height = _TITLE_LEGEND_IN + max(rows, 1) * _ROW_PITCH_IN + _AXIS_IN
+    height = max(_FIG_H, min(height, _MAX_H))
+
+    # Ink width of the longest row label, then the gutter it needs, then converting a
+    # gutter delta in inches into a width delta: `constrained_layout` keeps the plot area
+    # at its share of the canvas, so growing the canvas by `gutter * total / plot` grows
+    # the gutter by `gutter`.
+    ink_in = sum(2.0 if ord(ch) > 0x2E7F else 1.0 for ch in longest_label) * _LABEL_PT / 72.0
+    gutter_in = _ROW_LABEL_PAD_IN + ink_in
+    plot_in = max(_FIG_W - _BASE_GUTTER_IN, 1.0)
+    width = _FIG_W + max(0.0, gutter_in - _BASE_GUTTER_IN) * (_FIG_W / plot_in)
+    return min(width, _MAX_W), height
+
+
+def _size_for_rows(draw: Any, rows: int, longest_label: str, *, horizontal: bool) -> None:
+    """Attach the computed canvas size to a draw closure, for ``_render_sync`` to read.
+
+    An attribute rather than a wrapper object: `_render_sync` is the only reader, and every
+    draw closure already travels through it unchanged, so this keeps one interface instead
+    of giving the seven draw functions a size parameter they would all have to forward.
+    """
+    draw._psi_size = _row_aware_size(rows, longest_label, horizontal=horizontal)
 
 
 def _fit_column_labels(ax: Any, labels: list[Any]) -> None:
@@ -1017,9 +1108,15 @@ async def render_to_png(draw: Any, out_path: str) -> str:
 def _render_sync(draw: Any, out_path: str) -> None:
     """Thread body: style, figure, draw, save, and always close the figure.
 
-    Every chart is saved at exactly ``_FIG_W x _FIG_H`` inches — see the
-    ``savefig.bbox`` note in ``_apply_style`` for why a fixed canvas matters in a Feishu
-    doc. Constrained layout does the fitting inside that canvas.
+    The canvas is ``_FIG_W x _FIG_H`` unless the draw declared a different size — a
+    row-labelled chart asks for a taller one via ``_size_for_rows`` so its labels fit
+    instead of being thinned away. See the ``savefig.bbox`` note in ``_apply_style`` for why
+    the canvas must never be *cropped* to its content: that produced 26 different sizes
+    across 54 charts, and the narrow ones rendered as thumbnails in the doc. Growing it
+    from the data shape is a different thing — the same chart always gets the same canvas.
+
+    ``set_size_inches`` runs before ``draw`` so the artists lay out against the real canvas,
+    and ``constrained_layout`` recomputes margins at save time either way.
 
     The ``finally: close(fig)`` matters — a figure left open leaks its canvas, and a
     long-lived agent process rendering hundreds of charts would grow without bound.
@@ -1029,6 +1126,9 @@ def _render_sync(draw: Any, out_path: str) -> None:
 
     fig, ax = plt.subplots(figsize=(_FIG_W, _FIG_H), layout="constrained")
     try:
+        size = getattr(draw, "_psi_size", None)
+        if size is not None:
+            fig.set_size_inches(*size)
         draw(fig, ax)
         fig.savefig(out_path, format="png", facecolor="white")
     finally:
@@ -1752,6 +1852,10 @@ def draw_bar(
             source=source,
         )
 
+    # One labelled row per category: let the canvas grow to fit them at full type size
+    # instead of dropping labels. Horizontal charts also earn a gutter wide enough for the
+    # longest one; vertical charts keep the base width (their labels sit on the x axis).
+    _size_for_rows(draw, len(cats), max(cats, key=len, default=""), horizontal=horizontal)
     return draw
 
 

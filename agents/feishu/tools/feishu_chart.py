@@ -156,6 +156,12 @@ async def _render_donut(
         auto_number: Number the caption from the document's existing 图 captions
             (default true). Set false only when the caller manages numbering itself.
         source: Data provenance footnote.
+        colors: Optional list of colour strings, **one per series in series order** —
+            e.g. '["#34C724","#F5222D"]' for 正面绿 / 负面红. Use when the series
+            carry a conventional colour; omit to take the house palette
+            (#3370FF blue, #FF8800 amber, #34C724 green, #F5222D red, …).
+            The list length must equal the series count — a mismatch is reported,
+            never padded.
         user_key: The sender's open_id; needed for user-owned docs.
         identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
@@ -220,6 +226,12 @@ async def _render_funnel(
         auto_number: Number the caption from the document's existing 图 captions
             (default true). Set false only when the caller manages numbering itself.
         source: Data provenance footnote.
+        colors: Optional list of colour strings, **one per series in series order** —
+            e.g. '["#34C724","#F5222D"]' for 正面绿 / 负面红. Use when the series
+            carry a conventional colour; omit to take the house palette
+            (#3370FF blue, #FF8800 amber, #34C724 green, #F5222D red, …).
+            The list length must equal the series count — a mismatch is reported,
+            never padded.
         user_key: The sender's open_id; needed for user-owned docs.
         identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
@@ -257,6 +269,7 @@ async def _render_line(
     source: str = "",
     auto_number: bool = True,
     user_key: str = "",
+    colors: list[str] | None = None,
     identity: str = "",
 ) -> str:
     """Append a line chart to a Feishu doc — how values move along an ordered axis.
@@ -283,6 +296,12 @@ async def _render_line(
         auto_number: Number the caption from the document's existing 图 captions
             (default true). Set false only when the caller manages numbering itself.
         source: Data provenance footnote.
+        colors: Optional list of colour strings, **one per series in series order** —
+            e.g. '["#34C724","#F5222D"]' for 正面绿 / 负面红. Use when the series
+            carry a conventional colour; omit to take the house palette
+            (#3370FF blue, #FF8800 amber, #34C724 green, #F5222D red, …).
+            The list length must equal the series count — a mismatch is reported,
+            never padded.
         user_key: The sender's open_id; needed for user-owned docs.
         identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
@@ -292,6 +311,7 @@ async def _render_line(
         draw = _cr.draw_line(
             labels,
             series,
+            colors=colors,
             title=title,
             x_label=x_label,
             y_label=y_label,
@@ -325,6 +345,7 @@ async def _render_area(
     source: str = "",
     auto_number: bool = True,
     user_key: str = "",
+    colors: list[str] | None = None,
     identity: str = "",
 ) -> str:
     """Append an area chart to a Feishu doc — a trend whose accumulated volume matters.
@@ -357,6 +378,7 @@ async def _render_area(
         draw = _cr.draw_line(
             labels,
             series,
+            colors=colors,
             title=title,
             x_label=x_label,
             y_label=y_label,
@@ -392,6 +414,7 @@ async def _render_stacked_area(
     source: str = "",
     auto_number: bool = True,
     user_key: str = "",
+    colors: list[str] | None = None,
     identity: str = "",
 ) -> str:
     """Append a stacked area chart to a Feishu doc — composition changing over time.
@@ -426,6 +449,7 @@ async def _render_stacked_area(
         draw = _cr.draw_stacked_area(
             labels,
             series,
+            colors=colors,
             title=title,
             x_label=x_label,
             y_label=y_label,
@@ -464,6 +488,7 @@ async def _render_column(
     source: str = "",
     auto_number: bool = True,
     user_key: str = "",
+    colors: list[str] | None = None,
     identity: str = "",
 ) -> str:
     """Append a vertical column chart to a Feishu doc — compare a value across categories.
@@ -490,6 +515,12 @@ async def _render_column(
         auto_number: Number the caption from the document's existing 图 captions
             (default true). Set false only when the caller manages numbering itself.
         source: Data provenance footnote.
+        colors: Optional list of colour strings, **one per series in series order** —
+            e.g. '["#34C724","#F5222D"]' for 正面绿 / 负面红. Use when the series
+            carry a conventional colour; omit to take the house palette
+            (#3370FF blue, #FF8800 amber, #34C724 green, #F5222D red, …).
+            The list length must equal the series count — a mismatch is reported,
+            never padded.
         user_key: The sender's open_id; needed for user-owned docs.
         identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
@@ -501,6 +532,7 @@ async def _render_column(
         draw = _cr.draw_bar(
             labels,
             [(y_label or "数值", values)],
+            colors=colors,
             title=title,
             x_label=x_label,
             y_label=y_label,
@@ -537,6 +569,7 @@ async def _render_bar(
     source: str = "",
     auto_number: bool = True,
     user_key: str = "",
+    colors: list[str] | None = None,
     identity: str = "",
 ) -> str:
     """Append a horizontal bar chart to a Feishu doc — rankings and long category names.
@@ -561,6 +594,12 @@ async def _render_bar(
         auto_number: Number the caption from the document's existing 图 captions
             (default true). Set false only when the caller manages numbering itself.
         source: Data provenance footnote.
+        colors: Optional list of colour strings, **one per series in series order** —
+            e.g. '["#34C724","#F5222D"]' for 正面绿 / 负面红. Use when the series
+            carry a conventional colour; omit to take the house palette
+            (#3370FF blue, #FF8800 amber, #34C724 green, #F5222D red, …).
+            The list length must equal the series count — a mismatch is reported,
+            never padded.
         user_key: The sender's open_id; needed for user-owned docs.
         identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
@@ -572,6 +611,7 @@ async def _render_bar(
         draw = _cr.draw_bar(
             labels,
             [(x_label or "数值", values)],
+            colors=colors,
             title=title,
             x_label=x_label,
             y_label=y_label,
@@ -608,6 +648,7 @@ async def _render_grouped_column(
     source: str = "",
     auto_number: bool = True,
     user_key: str = "",
+    colors: list[str] | None = None,
     identity: str = "",
 ) -> str:
     """Append a grouped (clustered) column chart — compare 2-4 series side by side.
@@ -632,6 +673,12 @@ async def _render_grouped_column(
         auto_number: Number the caption from the document's existing 图 captions
             (default true). Set false only when the caller manages numbering itself.
         source: Data provenance footnote.
+        colors: Optional list of colour strings, **one per series in series order** —
+            e.g. '["#34C724","#F5222D"]' for 正面绿 / 负面红. Use when the series
+            carry a conventional colour; omit to take the house palette
+            (#3370FF blue, #FF8800 amber, #34C724 green, #F5222D red, …).
+            The list length must equal the series count — a mismatch is reported,
+            never padded.
         user_key: The sender's open_id; needed for user-owned docs.
         identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
@@ -641,6 +688,7 @@ async def _render_grouped_column(
         draw = _cr.draw_bar(
             labels,
             series,
+            colors=colors,
             title=title,
             x_label=x_label,
             y_label=y_label,
@@ -676,6 +724,7 @@ async def _render_stacked_column(
     source: str = "",
     auto_number: bool = True,
     user_key: str = "",
+    colors: list[str] | None = None,
     identity: str = "",
 ) -> str:
     """Append a stacked column chart — category totals **and** their internal composition.
@@ -702,6 +751,12 @@ async def _render_stacked_column(
         auto_number: Number the caption from the document's existing 图 captions
             (default true). Set false only when the caller manages numbering itself.
         source: Data provenance footnote.
+        colors: Optional list of colour strings, **one per series in series order** —
+            e.g. '["#34C724","#F5222D"]' for 正面绿 / 负面红. Use when the series
+            carry a conventional colour; omit to take the house palette
+            (#3370FF blue, #FF8800 amber, #34C724 green, #F5222D red, …).
+            The list length must equal the series count — a mismatch is reported,
+            never padded.
         user_key: The sender's open_id; needed for user-owned docs.
         identity: ``"user"`` / ``"bot"`` -- who owns the chart's document (see feishu_doc_create).
     """
@@ -711,6 +766,7 @@ async def _render_stacked_column(
         draw = _cr.draw_bar(
             labels,
             series,
+            colors=colors,
             title=title,
             x_label=x_label,
             y_label=y_label,
@@ -1493,33 +1549,37 @@ _CHART_SPECS: dict[str, dict[str, Any]] = {
     "line": {
         "fn": _render_line,
         "data": ["labels_json", "series_json"],
-        "opts": ["x_label", "y_label", "unit", "zero_baseline"],
+        "opts": ["x_label", "y_label", "unit", "zero_baseline", "colors"],
     },
-    "area": {"fn": _render_area, "data": ["labels_json", "series_json"], "opts": ["x_label", "y_label", "unit"]},
+    "area": {
+        "fn": _render_area,
+        "data": ["labels_json", "series_json"],
+        "opts": ["x_label", "y_label", "unit", "colors"],
+    },
     "stacked_area": {
         "fn": _render_stacked_area,
         "data": ["labels_json", "series_json"],
-        "opts": ["x_label", "y_label", "unit", "percent"],
+        "opts": ["x_label", "y_label", "unit", "percent", "colors"],
     },
     "column": {
         "fn": _render_column,
         "data": ["labels_json", "values_json"],
-        "opts": ["x_label", "y_label", "unit", "sort_desc", "highlight"],
+        "opts": ["x_label", "y_label", "unit", "sort_desc", "highlight", "colors"],
     },
     "bar": {
         "fn": _render_bar,
         "data": ["labels_json", "values_json"],
-        "opts": ["x_label", "y_label", "unit", "sort_desc", "highlight"],
+        "opts": ["x_label", "y_label", "unit", "sort_desc", "highlight", "colors"],
     },
     "grouped_column": {
         "fn": _render_grouped_column,
         "data": ["labels_json", "series_json"],
-        "opts": ["x_label", "y_label", "unit", "horizontal"],
+        "opts": ["x_label", "y_label", "unit", "horizontal", "colors"],
     },
     "stacked_column": {
         "fn": _render_stacked_column,
         "data": ["labels_json", "series_json"],
-        "opts": ["x_label", "y_label", "unit", "percent", "horizontal"],
+        "opts": ["x_label", "y_label", "unit", "percent", "horizontal", "colors"],
     },
     "waterfall": {
         "fn": _render_waterfall,
