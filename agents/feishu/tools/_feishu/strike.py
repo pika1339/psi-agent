@@ -8,12 +8,15 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-import _feishu_impl as _core
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
 
-from _feishu.drive import export_doc_impl
-from _feishu.sheet import read_sheet_grid_impl
+# _core 在文件末尾导入(与 contact.py 同因):本模块被顶层 import 时,若顶部就
+# import _feishu_impl,会撞上 _feishu_impl 底部 re-export 的半成品循环导入。
+
+# drive/sheet 的 impl 延迟到函数内导入:本模块先被顶层 import 时(strike 被
+# _feishu_impl re-export 的场景),顶层 import drive 会连带 drive→_feishu_impl
+# 的循环导入(drive 顶部也 import _feishu_impl)。
 
 
 def _build_wiki_get_node_request(token: str) -> BaseRequest:
@@ -55,6 +58,9 @@ async def sheet_strike_read_impl(
     board_link: str, person_name: str, cycle_date: str, user_key: str = ""
 ) -> dict[str, Any]:
     """Locate the cell (person x cycle column), export xlsx, parse its run strikes."""
+    from _feishu.drive import export_doc_impl  # noqa: PLC0415
+    from _feishu.sheet import read_sheet_grid_impl  # noqa: PLC0415
+
     # 1. wiki → obj_token
     wiki_token = board_link.rstrip("/").split("/")[-1]
     res = await _core._invoke(_build_wiki_get_node_request(wiki_token), user_key=user_key)
@@ -158,7 +164,7 @@ def _parse_cell_strikes(xlsx_path: Path, cell_ref: str) -> list[dict[str, Any]] 
     # 富文本 run: <r><rPr><strike .../></rPr><t>text</t></r>
     for rm in re.finditer(r"<r>(.*?)</r>", cell_xml, flags=re.S):
         run_xml = rm.group(1)
-        strike = "<strike" in run_xml
+        strike = _run_is_struck(run_xml)
         tm = re.search(r"<t[^>]*>(.*?)</t>", run_xml, flags=re.S)
         text = tm.group(1) if tm else ""
         runs.append({"text": _xml_unescape(text), "strike": strike})
@@ -182,7 +188,7 @@ def _si_runs(si_xml: str) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     for rm in re.finditer(r"<r>(.*?)</r>", si_xml, flags=re.S):
         run_xml = rm.group(1)
-        strike = "<strike" in run_xml
+        strike = _run_is_struck(run_xml)
         tm = re.search(r"<t[^>]*>(.*?)</t>", run_xml, flags=re.S)
         text = tm.group(1) if tm else ""
         runs.append({"text": _xml_unescape(text), "strike": strike})
@@ -190,6 +196,22 @@ def _si_runs(si_xml: str) -> list[dict[str, Any]]:
         tm = re.search(r"<t[^>]*>(.*?)</t>", si_xml, flags=re.S)
         runs.append({"text": _xml_unescape(tm.group(1)) if tm else "", "strike": False})
     return runs
+
+
+def _run_is_struck(run_xml: str) -> bool:
+    """``<strike val="false">`` = not struck — existence check alone misreads it.
+
+    Feishu exports write ``<strike val="true|false">`` explicitly on every run's
+    ``rPr``, so the old ``"<strike" in run_xml`` marked *all* runs struck (accident:
+    a whole comparison card reported 100% struck while most cells had no strike).
+    """
+    sm = re.search(r"<strike\b[^>]*>", run_xml)
+    if not sm:
+        return False
+    tag = sm.group(0)
+    if re.search(r'val="(false|0)"', tag):
+        return False
+    return True
 
 
 def _xml_unescape(text: str) -> str:
@@ -206,3 +228,7 @@ def _xml_unescape(text: str) -> str:
         lambda m: chr(int(m.group(1)[1:], 16)) if m.group(1).startswith("x") else chr(int(m.group(1))),
         out,
     )
+
+
+# 延迟到文件末尾导入,打破与 _feishu_impl 底部 re-export 的循环导入(见顶部注释)。
+import _feishu_impl as _core  # noqa: E402

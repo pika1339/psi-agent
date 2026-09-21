@@ -14,7 +14,6 @@ import json
 import pathlib
 from typing import Any
 
-import _feishu_impl as _core
 import anyio
 from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
@@ -511,3 +510,8 @@ async def get_message_image_impl(
     except OSError as exc:
         return _core._error(f"could not write file: {exc}", path=str(path))
     return {"ok": True, "path": str(path), "bytes": len(data)}
+
+
+# 延迟到文件末尾导入,打破与 _feishu_impl 底部 re-export 的循环导入
+# (drive 被顶层 import 时,_feishu_impl 尚未执行完,re-export 会撞上半成品)。
+import _feishu_impl as _core  # noqa: E402
