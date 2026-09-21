@@ -76,8 +76,7 @@ def _md_cell(value: str) -> str:
     """
     items = _split_items(value)
     body = "<br>".join(
-        _decorate_status(_normalize_status(item)) if _is_status_cell(item) else _md_escape(item)
-        for item in items
+        _decorate_status(_normalize_status(item)) if _is_status_cell(item) else _md_escape(item) for item in items
     )
     return body.replace("|", "\\|").replace("\r", "")
 
