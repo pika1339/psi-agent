@@ -123,19 +123,34 @@ PYTHONPATH=src .venv/Scripts/python.exe -m pytest -o testpaths= --no-cov tests/d
 
 ---
 
-## `workspace/tools/` 的投放
+## `workspace/{tools,config}/` 的投放
 
 ### 为什么这一章必须存在
 
-上面两章覆盖的是「镜像里的东西」和「目标机上的单个脚本」。业务工具是第三类, 而且是最容易
-静默错的一类: `agents/feishu/tools/` 那 241 个 `.py` **不进镜像**, 而是 bind mount 进容器,
-换镜像发布完全不会更新它们, 靠人手投放。没有构建闸门, 没有测试, 漏投一个文件不报错。
+上面两章覆盖的是「镜像里的东西」和「目标机上的单个脚本」。**bind mount 的 workspace 子树**
+是第三类, 而且是最容易静默错的一类: 它们 **不进镜像**, 换镜像发布完全不会更新, 靠人手投放。
+没有构建闸门, 没有测试, 漏投一个文件不报错。目前有三类, 每一类都要单独审:
+
+| 子树 | 内容 | 现状 |
+| --- | --- | --- |
+| `tools/` | 241 个业务 `.py` | 有投放流程 |
+| `config/` | 7 个 `.yaml` 口径文件 | ⚠️ 一直没有投放流程, 见下 |
+| `skills/` | 引擎与 skill 文本 | ⚠️ 有 4 条软链只活在生产上 |
 
 2026-09-14 实测的后果: 生产 `_feishu_spec.py` 是新版(683 行, 分层接口 `rules_for_layers` 在
 里面), 而调用它的 `_feishu_api_impl.py` 还是旧版(434 行, 仍调单目录的 `rules_for`)。9-12 那次
 投放投了前者、漏了后者。于是 **195 条飞书 API 护栏规则一条都不生效**, 该拒的调用全部放过,
 唯一线索是一行 INFO 级日志 `0 from 0 of 1 roots [(none)]`。修法不是改代码 —— `origin/main`
 里早就是对的 —— 而是把漏掉的那个文件投上去。
+
+2026-09-18 同一类事故的第二例, 换了个目录 —— 这次是 `config/` 整个从未投放。
+`config/meeting-sop.yaml` 从 `172df2f83`(09-08)起就在仓库里, 而生产的 gateway 带
+`--default-agent /workspace`(`launch-gateway.sh`, 已核到部署版本 `99e6b5d` 也是这句),
+所以 `AGENT_ROOT` 就是 `/workspace`, `meeting_pipeline_run.py` 把口径解析成
+`/workspace/config/meeting-sop.yaml`。文件不在, 于是周中对齐会那条 pipeline **每次运行都抛
+`RuntimeError: 会议 SOP 配置缺失` 并整场失败**, 而且失败得很干净: 模型、转写、收件人全都正常,
+只有判定口径读不到。注意这次不是「漏投一个文件」而是「整个子树不在清单里」—— 只审 `tools/` 的
+检查永远看不见它。
 
 朝最贵的方向错、表面功能跑通、日志不报错, 这三条凑齐就没有判据可言。所以这一章的主体是
 一个脚本, 而不是一串命令。
@@ -144,9 +159,14 @@ PYTHONPATH=src .venv/Scripts/python.exe -m pytest -o testpaths= --no-cov tests/d
 
 ```bash
 # 在目标机上跑(脚本自己找 clone, 或用 REPO= 指定)
-bash /tmp/audit-workspace-drift.sh origin/main                 # 审全部三份 workspace
-bash /tmp/audit-workspace-drift.sh origin/main workspace       # 只审 gateway 那份
+bash /tmp/audit-workspace-drift.sh origin/main                       # tools, 全部三份 workspace
+bash /tmp/audit-workspace-drift.sh origin/main workspace             # tools, 只审 gateway 那份
+bash /tmp/audit-workspace-drift.sh origin/main workspace config '*.yaml'   # config, 只 gateway
 ```
+
+用法是 `<ref> [workspace...] [subtree] [filter]`。尾部两个都可选, `subtree` 取
+`tools`(默认)或 `config`, `filter` 是 `find -name` 的模式(`tools` 配 `*.py`、`config` 配
+`*.yaml`)。**两个子树必须各审一遍** —— 脚本一次只比一棵子树。
 
 它把差异分成四类, **混成一个数字就再也分不开了**:
 

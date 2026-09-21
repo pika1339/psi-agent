@@ -2,9 +2,10 @@
 # 审计生产 workspace/tools 与 git 的差异 —— 投放前必跑, 也是投放后的判据。
 #
 # 用法(在目标机上跑, 或本地 ssh 进去跑):
-#     audit-workspace-drift.sh <git-ref> [workspace...]
-#     audit-workspace-drift.sh origin/main                    # 审全部三份
-#     audit-workspace-drift.sh origin/main workspace          # 只审 gateway 那份
+#     audit-workspace-drift.sh <git-ref> [workspace...] [subtree] [filter]
+#     audit-workspace-drift.sh origin/main                              # tools, 全部三份
+#     audit-workspace-drift.sh origin/main workspace                    # tools, 只 gateway 那份
+#     audit-workspace-drift.sh origin/main workspace config '*.yaml'    # 换成审 config/
 #
 # 为什么要有这个脚本, 而不是让文档写一串 md5 命令:
 #
@@ -13,6 +14,15 @@
 # `_feishu_api_impl.py` 是旧版 —— 9-12 那次投放投了前者漏了后者, 于是 195 条飞书
 # API 护栏规则一条都不生效, 唯一线索是一行 INFO 日志。漏投不报错、不变红、
 # 功能表面跑通, 这种失败没有判据可言。
+#
+# 2026-09-18 同一类事故的第二例, 换了个目录: `workspace/config/` 不在投放清单里,
+# 于是 `config/meeting-sop.yaml` 从来没投上去过。生产的 gateway 是
+# `--default-agent /workspace`, 所以 `AGENT_ROOT` 就是 `/workspace`、
+# `MEETING_SOP_CONFIG_PATH` 解析成 `/workspace/config/meeting-sop.yaml`, 缺了它
+# 周中对齐会那条 pipeline 每次运行都在 `meeting_pipeline_run.py` 里抛
+# `RuntimeError: 会议 SOP 配置缺失` 并整场失败 —— 模型、转写、收件人都正常,
+# 唯独判定口径读不到。所以**别只审 tools**: `config/` 与 `skills/` 是同一类
+# 人手投放物, 换个 subtree 参数各审一遍。
 #
 # 本脚本要回答的正是"差哪些文件", 且必须区分四类 —— 混成一个数字就再也分不开了:
 #
@@ -37,10 +47,57 @@ set -euo pipefail
 REF="${1:-origin/main}"
 shift || true
 WORKSPACES=("$@")
+# 尾部可选参数: [subtree] [filter]。从后往前摘 —— 先摘 filter(它一定在最后),
+# 再摘 subtree。
+#
+# subtree 的判据是**值对得上白名单**, 不是「长得像路径」。位置判据(含斜杠)
+# 会把 `audit ... config` 这种写法判成 workspace, 于是静默去审
+# `$PROD_ROOT/config/tools`、报出一整片假「缺失」—— 审计脚本给出错误结论比
+# 报错更糟。白名单只有两个名字, 维护成本近乎零; 加新 subtree 时同时加在这里。
+_AUDIT_SUBTREES="tools config"
+# subtree 名 -> 仓库内路径。两者不同源: 仓库里是 `agents/feishu/<name>`,
+# 生产侧是 `<workspace>/<name>`。
+_subtree_path() { printf 'agents/feishu/%s' "$1"; }
+#: 逐字比较, 不用 `case` 的子串匹配。子串匹配会把任一**包含** subtree 名的 workspace
+#: 吃掉 —— 实测 workspace 名 `ok` 命中 `tools`, 于是 `audit ... ok` 被判成
+#: `subtree=ok`; 而 WORKSPACES 变空又会回落成默认三份, 症状就成了「只审一份却报三份的
+#: 差异」, 与传入的名字毫无关系。代价: `tools` / `config` 这两个名字留作 subtree 专用。
+_is_subtree_name() {
+  local name
+  for name in $_AUDIT_SUBTREES; do
+    [ "$name" = "$1" ] && return 0
+  done
+  return 1
+}
+# filter 的判据是「含 `*` 或 `?`」, 与位置无关, 所以它不会与 workspace 名混淆。
+if [ ${#WORKSPACES[@]} -gt 0 ]; then
+  last="${WORKSPACES[${#WORKSPACES[@]}-1]}"
+  if [[ "$last" == *'*'* || "$last" == *'?'* ]]; then
+    FILTER="$last"; unset 'WORKSPACES[${#WORKSPACES[@]}-1]'
+  fi
+fi
+if [ ${#WORKSPACES[@]} -gt 0 ]; then
+  last="${WORKSPACES[${#WORKSPACES[@]}-1]}"
+  if _is_subtree_name "$last"; then
+    SUBTREE="$(_subtree_path "$last")"; unset 'WORKSPACES[${#WORKSPACES[@]}-1]'
+  fi
+fi
+
+# unset 掉尾部元素后下标会留洞, 重新压实 —— 否则 `${#arr[@]}` 对, 但遍历会带上空洞。
+WORKSPACES=(${WORKSPACES[@]+"${WORKSPACES[@]}"})
 [ ${#WORKSPACES[@]} -eq 0 ] && WORKSPACES=(workspace workspace-luolin workspace-chengxx)
 
 PROD_ROOT="${PROD_ROOT:-/srv/haitun/psi-agent}"
-SUBTREE="${SUBTREE:-agents/feishu/tools}"
+# 默认仍是 tools —— 既有调用方(文档 / 跑道)一字不用改。审 config/ 时显式传
+# `config` 加对应 filter。tools 只比 .py 是 2026-09-14 定下的: 该目录当时实测
+# 241 个业务文件全是 .py, 而 `find -name '*.py'` 正是为了防止顶层 glob 漏掉
+# `_feishu/` 私有子目录。config/ 里是 .yaml, 换个 filter 即可 —— 差异只有这一项。
+SUBTREE="${SUBTREE:-$(_subtree_path tools)}"
+FILTER="${FILTER:-*.py}"
+# 生产侧目录名 = subtree 的末段。历史上写死成 `tools`, 于是审 config 时会去比
+# `$PROD_ROOT/<workspace>/tools/*.yaml` —— 那个目录下一条都匹配不到, 报出来的是
+# 一整片假「缺失」。默认值仍是 tools, 所以既有行为逐字节不变。
+SUBDIR="${SUBTREE##*/}"
 REPO="${REPO:-}"
 
 # 仓库位置: 显式给 REPO, 否则找一个能用的 clone。不 clone 新的 —— 目标机的 GitHub
@@ -62,6 +119,7 @@ cd "$REPO"
 SHA=$(git rev-parse --short "$REF" 2>/dev/null) || { echo "解析不出 ref: $REF" >&2; exit 2; }
 echo "基准: $REF = $SHA  ($(git log -1 --format=%ad --date=short "$SHA"))"
 echo "仓库: $REPO"
+echo "范围: $SUBTREE  ($FILTER)"
 echo
 
 # git 侧快照。用 archive 而非 checkout: 不动工作树, 也不受别的会话影响。
@@ -73,13 +131,13 @@ GITDIR="$SNAP/$SUBTREE"
 
 # 全树走, 不是顶层 glob。2026-09-14 实测: 顶层 glob 漏掉 6 个 `_feishu/` 私有子目录
 # 文件, 其中 3 个的缺失直接导致工具加载失败。
-( cd "$GITDIR" && find . -name '*.py' | sed 's|^\./||' ) | LC_ALL=C sort -u > "$SNAP/git_names"
-echo "git 侧: $(wc -l < "$SNAP/git_names") 个 .py"
+( cd "$GITDIR" && find . -name "$FILTER" | sed 's|^\./||' ) | LC_ALL=C sort -u > "$SNAP/git_names"
+echo "git 侧: $(wc -l < "$SNAP/git_names") 个 $FILTER"
 echo
 
 RC=0
 for W in "${WORKSPACES[@]}"; do
-  T="$PROD_ROOT/$W/tools"
+  T="$PROD_ROOT/$W/$SUBDIR"
   [ -d "$T" ] || { echo "跳过 $W: $T 不存在"; echo; continue; }
 
   same=0; stale=0; ahead=0; missing=0
@@ -115,7 +173,7 @@ for W in "${WORKSPACES[@]}"; do
     fi
   done < "$SNAP/git_names"
 
-  ( cd "$T" && find . -name '*.py' | sed 's|^\./||' ) | LC_ALL=C sort -u > "$SNAP/prod_$W"
+  ( cd "$T" && find . -name "$FILTER" | sed 's|^\./||' ) | LC_ALL=C sort -u > "$SNAP/prod_$W"
   # comm 要求两边都排过序, 且必须同一 collation —— LC_ALL=C 两处都加。不加会报
   # "not in sorted order" 并吐出自相矛盾的结果(同一文件同时出现在两侧), 实测踩过。
   comm -13 "$SNAP/git_names" "$SNAP/prod_$W" > "$SNAP/only_$W" || true
