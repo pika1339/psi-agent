@@ -39,6 +39,17 @@ _BOX = "完成"
 # DDL 状态 → (emoji, 卡片主题色)。绿=还早, 黄=今天到期, 红=已逾期。
 _DUE_OK = "🟢"
 _DUE_TODAY = "🟡"
+
+
+# 入职清单完成窗口(自然日) —— 与 config/rookie_sop.yaml 的 completion_window_days 一致
+_COMPLETION_WINDOW = 6
+
+
+def _completion_window(rows: list[dict[str, Any]]) -> int:
+    """清单完成窗口天数; 暂用常量, 与 config 保持一致。"""
+    return _COMPLETION_WINDOW
+
+
 _DUE_LATE = "🔴"
 _DONE_MARK = "✅"
 _NA_MARK = "⚪"
@@ -62,15 +73,20 @@ def _due_state(row: dict[str, Any], today: date | None) -> str:
 
 
 def _card_template(rows: list[dict[str, Any]], today: date | None) -> str:
-    """入职卡只用红绿两色, 按**入职第几天**定, 不按每行的 DDL。
+    """入职卡三色, 按**入职第几天**定(与 6 天窗口对齐), 不按每行的 DDL。
 
-    Day 1 绿(还早)、Day 2 红(最后一天)。全部做完一律绿 —— 做完了就没有紧迫可言。
-    刻意不再用橙/蓝: 需求就是红绿两色, 多一种颜色就多一层要解释的语义。
+    Day 1-4 绿(还早)、Day 5(倒数第二天)橙、Day 6+(最后一天)红。
+    全部做完一律绿 —— 做完了就没有紧迫可言。
     """
     marks = {_due_state(r, today) for r in rows}
     if marks and marks <= {_DONE_MARK, _NA_MARK}:
         return "green"
-    return "red" if _day_index(rows, today) >= 2 else "green"
+    day = _day_index(rows, today)
+    if day >= _COMPLETION_WINDOW:
+        return "red"
+    if day == _COMPLETION_WINDOW - 1:
+        return "orange"
+    return "green"
 
 
 def _day_index(rows: list[dict[str, Any]], today: date | None) -> int:
@@ -214,14 +230,18 @@ def entry_card(
     # 措辞刻意用「了解原因 / 遇到困难」而非「上报、通报」: 卡住多半有正当理由
     # (等权限、等人带), HR 要做的是解开堵点而不是问责, 所以后半句直接给出路。
     if not progress.all_done:
-        if _day_index(rows, today) >= 2:
+        window = _completion_window(rows)
+        if _day_index(rows, today) >= window:
             urgency = (
                 "🔴 **今天是最后一天**——若今天收尾时仍未完成，HR 会来了解你是否遇到困难。"
                 "卡在哪里直接说，缺权限、缺人带都能帮你推。"
             )
+        elif _day_index(rows, today) == window - 1:
+            urgency = "🟡 **明天是最后一天**——请明天收尾完成清单，HR 会来检查完成情况。"
         else:
             urgency = (
-                "🟢 **请在明天之内完成**——今天先把能做的做掉，明天收尾。若到明天还没完成，HR 会来了解你是否遇到困难。"
+                f"🟢 **请在入职 {window} 天内完成**——今天先把能做的做掉，第 {window} 天收尾。"
+                f"若到第 {window} 天还没完成，HR 会来了解你是否遇到困难。"
             )
         elements.append({"tag": "markdown", "content": urgency})
         elements.append({"tag": "hr"})
@@ -398,22 +418,30 @@ def remind_card(
     第 2 天的文案更急一些, 但不在卡面上声称「已通知 HR」——那是否属实取决于
     hr_notify_id 是否配置, 卡片本身不该替调用方担保一件它不知道结果的事。
     """
-    is_day1 = day_index <= 1
     header = f"入职第 {day_index} 天\n{_progress_bar(f'{progress.done}/{progress.total}')}"
-    # 第 2 天的文案点明「今天收尾时仍未完成, HR 会来了解原因」—— 这不是威胁,
-    # 而是把既定规则说在前面: 19:00 的异常提醒确实只报第 2 天结束仍未完成的人
-    # (见 rookie_sop_digest.active_rookies), 让人知道时间线比事后被问更公平。
+    # 一周窗口的文案分三档: 第 1 天轻提醒; 第 6 天(倒数第二天)预警「明天检查」;
+    # 第 7 天(最后一天)点明「今天收尾仍未完成 HR 会来了解」—— 不是威胁, 而是把
+    # 既定规则说在前面, 让人知道时间线比事后被问更公平。
     # 措辞刻意用「了解原因」而不是「上报/通报」: 卡住往往有正当理由(等权限、
     # 等人带), HR 要做的是把堵点解开, 不是问责。
-    urgency = (
-        "🟢 今天是入职第一天，抽空把清单上的事项过一遍～"
-        if is_day1
-        else (
-            "🔴 入职第二天了，清单还没完成，请尽快处理。\n"
+    if day_index <= 1:
+        urgency = "🟢 今天是入职第一天，抽空把清单上的事项过一遍～"
+    elif day_index == 5:
+        urgency = (
+            "🟡 明天是最后一天了——请明天收尾完成清单，HR 会来检查完成情况。\n"
+            "卡在哪里就直接说，缺权限、缺人带都能帮你推。"
+        )
+    elif day_index >= 6:
+        urgency = (
+            "🔴 今天是最后一天，清单还没完成，请尽快处理。\n"
             "如果今天收尾时仍未完成，HR 会来了解原因——卡在哪里就直接说，"
             "缺权限、缺人带都能帮你推。"
         )
-    )
+    else:
+        urgency = (
+            f"🔵 入职第 {day_index} 天了，还有 {max(progress.total - progress.done, 0)} 项未完成，按自己的节奏推进。\n"
+            "每两天 HR 会看一次进度；卡在哪里就直接说，缺权限、缺人带都能帮你推。"
+        )
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "content": header},
         {"tag": "markdown", "content": urgency},
@@ -441,21 +469,45 @@ def remind_card(
             }
         )
     elements.extend(_footer(sop_url))
-    return _shell("入职卡 · 提醒", elements, "green" if is_day1 else "red"), handlers
+    if day_index <= 1:
+        theme = "green"
+    elif day_index == 5:
+        theme = "orange"
+    elif day_index >= 6:
+        theme = "red"
+    else:
+        theme = "blue"
+    return _shell("入职卡 · 提醒", elements, theme), handlers
 
 
-def hr_feedback_card(name: str, progress: Any, sop_url: str = "") -> tuple[dict[str, Any], dict[str, str]]:
-    """入职第 2 天仍未完成时, 单独给 HR 的一张即时反馈卡。
+def hr_feedback_card(
+    name: str, progress: Any, sop_url: str = "", day_index: int = 2, rows: list[dict[str, Any]] | None = None
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """发卡人每两天收到的一张进度抄送卡 —— 报模块级进度, 不逐条列条目。
 
-    与 19:00 的异常提醒(digest_card)不同: 那份只报「第 2 天结束仍未完成」的人, 覆盖全体
-    新人; 这张是「这个人到第二天还没完成」的单点及时提醒, 只读, 不挂任何回调。
+    HR 要的是「谁卡在哪」: 各模块 x/y 一眼看清; 逐条列 40+ 个标题除了刷屏没信息量。
+    ``rows`` 传入时按模块聚合; 不传则退化为只报总数。
     """
     remaining = max(progress.total - progress.done, 0)
-    lines = [f"⚠️ **{name}** 入职第二天了，还有 {remaining}/{progress.total} 项未完成。"]
-    for label, rows in (("已逾期", progress.overdue), ("今天到期", progress.due_today)):
-        if rows:
-            titles = "、".join(str(r.get("项") or "") for r in rows)
-            lines.append(f"**{label}**：{titles}")
+    if day_index >= 6:
+        head = f"⚠️ **{name}** 今天是入职最后一天，还有 {remaining}/{progress.total} 项未完成。"
+    else:
+        head = f"📊 **{name}** 入职第 {day_index} 天进度：还剩 {remaining}/{progress.total} 项未完成。"
+    lines = [head]
+    if rows:
+        by_module: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            module = str(r.get("模块") or "")
+            if module and str(r.get("状态") or "") != "不适用":
+                by_module.setdefault(module, []).append(r)
+        if by_module:
+            lines.append("各部分完成：")
+            for module, module_rows in by_module.items():
+                done_n = sum(1 for r in module_rows if str(r.get("状态") or "") == "已完成")
+                lines.append(f"{module}　{done_n}/{len(module_rows)}")
+    overdue_n = len(progress.overdue)
+    if overdue_n:
+        lines.append(f"⚠️ 其中已逾期 {overdue_n} 项")
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": "\n".join(lines)}]
     elements.extend(_footer(sop_url))
     return _shell("入职卡 · 进度提醒", elements, "orange"), {}

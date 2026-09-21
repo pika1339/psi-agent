@@ -40,13 +40,16 @@ REMIND_DAYS = 2
 SYNC_DAYS = 7
 
 
-def decide_remind(rows: list[dict[str, Any]], today: date, day_index: int) -> dict[str, Any]:
-    """五条分支: 毕业 / 催办(第1天) / 催办+上报HR(第2天) / 只同步(第3-7天) / 停止(第8天起)。
+def decide_remind(rows: list[dict[str, Any]], today: date, day_index: int, window_days: int = 7) -> dict[str, Any]:
+    """一周窗口的分支: 毕业 / 催办(第1天) / 只同步(第2-5天) / 预警(第6天) /
+    催办+上报HR(第7天) / 停止(第8天起)。
 
-    发卡只有两天, 但同步窗口有七天 —— 这是两件事:
-      - 发卡: Day 1、Day 2 各一次。第 3 天起不再打扰新人。
-      - 同步: 第 3-7 天每天 9:00 仍跑一次(kind=sync_only), 让进度继续进表、卡面继续
-        更新; 高频那份(每 10 分钟)只覆盖前两天, 这一档是它之后的兜底。
+    发卡只有三天(第 1/6/7 天), 但同步窗口有七天 —— 这是两件事:
+      - 发卡: Day 1 轻提醒; Day 6(倒数第二天)预警「明天最后一天, HR 会检查」;
+        Day 7(最后一天)催办并让 HR 知道。
+      - 同步: 第 2-7 天每天 9:00 仍跑一次(kind=sync_only 覆盖第 2-5 天), 让进度
+        继续进表、卡面继续更新; 高频那份(每 10 分钟)只覆盖前两天, 这一档是它
+        之后的兜底。
     第 8 天起 kind=stop, 调用方据此自删定时 —— 不能让它永远到点转。
 
     "催办+上报" 不代表 HR 反馈卡真的会发出去——那要看 hr_notify_id 是否配置,
@@ -57,17 +60,18 @@ def decide_remind(rows: list[dict[str, Any]], today: date, day_index: int) -> di
         return {"kind": "graduate", "progress": progress}
     if day_index <= 1:
         return {"kind": "remind", "progress": progress, "notify_hr": False}
-    if day_index == 2:
-        # 第 2 天的催办值得让 HR 知道 —— 那正是 rookie_sop_digest 的入选条件
-        # (入职第 2 天结束仍未完成)。
-        return {"kind": "remind", "progress": progress, "notify_hr": True}
-    if day_index <= SYNC_DAYS:
-        # 第 3-7 天: **不发卡, 只同步**。发卡只有两天(用户明确定过) —— 之后是否还没
-        # 做完是 HR 反馈卡该管的事, 不该让新人天天收到催办卡到无穷。但进度还得继续
-        # 更新: 高频同步(每 10 分钟)只覆盖前两天, 若这里也一并停掉, 第 3 天起新人
-        # 勾什么都不会进表, 卡面和 HR 那张表就此冻结。所以这一档保留定时、只跑同步。
+    if day_index < window_days:
+        if day_index % 2 == 0:
+            # 每两天(第 2/4 天)提醒新人, 并把进度抄送 HR。
+            return {"kind": "remind", "progress": progress, "notify_hr": True}
+        # 间隔日: **不发卡, 只同步**。给新人安静推进的空间, 但进度还得继续更新:
+        # 高频同步(每 10 分钟)只覆盖前两天, 若这里也一并停掉, 之后新人勾什么都不会
+        # 进表, 卡面和 HR 那张表就此冻结。所以这一档保留定时。
         return {"kind": "sync_only", "progress": progress}
-    # 第 8 天起彻底停: 到这一步还没做完, 靠定时也不会变, 该由 HR 当面解决。
+    if day_index == window_days:
+        # 最后一天(第 6 天): 收尾催办值得让 HR 知道。
+        return {"kind": "remind", "progress": progress, "notify_hr": True}
+    # 窗口过后彻底停: 到这一步还没做完, 靠定时也不会变, 该由 HR 当面解决。
     # 不停的话就是一个永远到点转的定时。
     return {"kind": "stop", "progress": progress}
 
@@ -132,7 +136,9 @@ async def rookie_sop_remind(open_id: str = "", workspace: str = "") -> str:
     today = date.today()
     onboard = next((r["入职日"] for r in rows if isinstance(r.get("入职日"), date)), today)
     day = _cfg.day_index(onboard, today)
-    decision = decide_remind(rows, today, day)
+    cfg_early = await _store.load_config()
+    window = int(cfg_early.get("completion_window_days") or 7)
+    decision = decide_remind(rows, today, day, window_days=window)
     kind = decision["kind"]
     progress = decision["progress"]
 
@@ -165,7 +171,7 @@ async def rookie_sop_remind(open_id: str = "", workspace: str = "") -> str:
             result["truncated"] = True
         return json.dumps(result, ensure_ascii=False)
 
-    cfg = await _store.load_config()
+    cfg = cfg_early
     name = next((str(r.get("姓名") or "") for r in rows if r.get("姓名")), target)
 
     # 顺手把入口卡重绘一遍 —— 它的主题色按「入职第几天」定(Day 1 绿、Day 2 起红),
@@ -242,8 +248,9 @@ async def rookie_sop_remind(open_id: str = "", workspace: str = "") -> str:
     hr_feedback: dict[str, Any] = {}
     if kind == "remind" and decision.get("notify_hr"):
         # kind == "remind" 已经保证 progress.all_done 为假(decide_remind 先判毕业),
-        # 这里不必再判一次 —— 走到这里就是"第 2 天, 还没做完"。
-        hr_feedback = await _send_hr_feedback(cfg, name, progress)
+        # 这里不必再判一次 —— 走到这里就是"每两天的抄送点, 还没做完"。
+        sender = str((state.get("senders") or {}).get(target) or "").strip()
+        hr_feedback = await _send_hr_feedback(cfg, name, progress, day, sender_open_id=sender, rows=rows)
 
     result: dict[str, Any] = {
         "ok": True,
@@ -266,7 +273,14 @@ async def rookie_sop_remind(open_id: str = "", workspace: str = "") -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-async def _send_hr_feedback(cfg: dict[str, Any], name: str, progress: Any) -> dict[str, Any]:
+async def _send_hr_feedback(
+    cfg: dict[str, Any],
+    name: str,
+    progress: Any,
+    day_index: int = 2,
+    sender_open_id: str = "",
+    rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """入职第 2 天仍未完成时, 顺带给 HR 发一张反馈卡。
 
     hr_notify_id 在联调阶段被刻意留空(安全考虑) —— 空的时候必须明确跳过并说明原因,
@@ -274,11 +288,18 @@ async def _send_hr_feedback(cfg: dict[str, Any], name: str, progress: Any) -> di
     收件人与 ``receive_id_type`` 一律取自配置(见 ``_store.hr_target``): 把 ``open_id``
     写死在这里, 配置里填的租户 ``user_id`` 就会报 ``99992361 open_id cross app``。
     """
-    hr_target, hr_id_type = _store.hr_target(cfg)
+    # 收件人: 发卡人优先(谁发卡谁跟进), 没记录发卡人时回退 config 的 hr_notify_id。
+    hr_target, hr_id_type = (sender_open_id, "open_id") if sender_open_id else _store.hr_target(cfg)
     if not hr_target:
-        return {"ok": False, "sent": False, "reason": "hr_notify_id is empty in config/rookie_sop.yaml"}
+        return {
+            "ok": False,
+            "sent": False,
+            "reason": "no sender recorded and hr_notify_id is empty in config/rookie_sop.yaml",
+        }
 
-    card, handlers = _card.hr_feedback_card(name, progress, str(cfg.get("sop_doc_url") or ""))
+    card, handlers = _card.hr_feedback_card(
+        name, progress, str(cfg.get("sop_doc_url") or ""), day_index=day_index, rows=rows
+    )
     sent = _store._parse_result(
         await feishu_message_send_card(
             hr_target,

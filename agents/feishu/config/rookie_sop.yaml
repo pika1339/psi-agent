@@ -1,137 +1,299 @@
-# 新人入职 SOP 清单（V3）—— 改这里不用改代码。
+# 新人入职 SOP 清单(V4 新模板)—— 改这里不用改代码。
 #
-# window_days: SOP 的 Day 窗口天数（「Day 1-3」= 3）；截止日 = 入职日 + window_days - 1
-# dev_only:    true 表示仅研发适用（新人在入口卡上自选角色后生效）
-# url:         填了 url 的条目是**必读材料**，详情页渲染成链接 + 并排两个理解勾选
-#              （已完全理解 / 未完全理解），而不是笼统的「完成」——
-#              阅读类的验收是「读过并明确表示理解」，不是「已阅读」。
+# 结构(相对 V3 的扩展, 保持向后兼容):
+#   header:   文档头部静态区(欢迎词/说明/伙伴特质 3 条可勾选/完整 SOP 链接)
+#   mentions: 文本里写 @名字 即渲染成飞书 mention(open_id 按海豚豚应用维度)
+#   faq:      文档尾部问答区(纯静态, 不进明细表、不参与进度)
+#   modules:  清单模块。每个模块可带 groups(文档里渲染成 H3 小组标题),
+#             不带 groups 时与 V3 相同(条目直接跟在模块标题下)。
 #
-# 粒度取「混合」：第 0/1/2 件事是要动手做的，逐行为细拆；第 3-8 件事是制度类、
-# 只需知晓，每章一项「已阅读理解」。这样既漏不掉要办的事，清单也不至于太长。
+# 条目字段:
+#   id/title/acceptance: 同 V3。acceptance 里可写 @名字(见 mentions)与
+#      链接片段(见下方 links 说明)。
+#   url:        填了 url 的是必读材料(链接 + 已完全理解/未完全理解 两个勾选)
+#   got_it_note: 必读材料的「已完全理解」勾选后面追加的说明文字
+#   dev_only:    true 表示仅研发适用(角色选择后生效)
+#   window_days: 模块级(组内条目共享模块窗口); 也可单条覆盖
+#   links:       [{text: 片段文字, url: 链接}] —— acceptance 里出现 text 片段时
+#               渲染成超链接 run(如「南门师生活动中心」→ 高德地图链接)
+#
+# 模块字段:
+#   checker: 验收人名字(渲染成「验收人@名字」, 在 mentions 里则 mention)
 
 company_name: 真知
 card_title_prefix: 入职卡
 sop_doc_url: https://genuineknowledge.feishu.cn/docx/BFs4dmCxkohnMVxP47vc7Exonxf
-# 罗霖（HRD）的**租户 user_id**（不带 ou_ 前缀）: 跨应用稳定。
-# open_id 按应用隔离 —— 换了飞书应用（生产 ToB / 联调）旧值会直接报
-# 99992361 open_id cross app, 19:00 的异常提醒就发不出去（2026-09-12 复盘）。
-# 留空则异常提醒不发；类型必须与上面的 id 同源, 发送侧按 hr_notify_id_type 发。
+# TODO 闭环流程图图片(相对 agent 包根)。飞书 API 画不了真流程图(流程图块是空画布),
+# 所以用图片块: 发卡时由 provision_doc 上传进 TODO 模块。留空则不插图。
+flowchart_image: resources/todo_flow.png
+# 入职清单完成窗口(自然日): 第 6 天是最后一天; 第 2/4 天提醒新人并把进度抄送 HR。
+completion_window_days: 6
+# 罗霖(HRD)的租户 user_id; 留空则异常提醒不发。类型与 id 同源。
 hr_notify_id: 98ba56b8
 hr_notify_id_type: user_id
 
-# 全组织共用**同一个**多维表格（总览表一人一行、明细表一人 28 行）。
-#
-# 刻意写在配置里而不是各人的 state 里: state 存在每个人自己的 workspace,
-# 于是每个新人首次发卡都会发现「我这儿没有 app_token」而各建一个新库 ——
-# 实测踩过, 16 个人建出 16 个互不相干的库, HR 打开只看得到最早那两个人,
-# 19:00 的异常提醒也只扫得到一个库。库坐标是全组织共享的事实, 不该按人存。
-#
-# 留空则首次发卡时自动建一个, 并把 id 打印在返回值里 —— 填回这里即可固定。
+# 全组织共用同一个多维表格库(总览表一人一行、明细表一人一行一条目)。
+# 坐标是全组织共享的事实, 不该按人存(见 V3 注释)。
 shared_base:
   app_token: VhCVbD84jagQQ6s9qQycrU9QnZO
   overview_table_id: tbl1wCzB6WZRld7M
   detail_table_id: tblzziivulX7jiFL
 
-modules:
-  # ── 第 0 件事：到办公室先搞定这些 ──────────────────────────
-  - name: 到岗准备
-    window_days: 1
-    items:
-      - id: wifi
-        title: 连上 WiFi
-        acceptance: 404 是 KCL_in_GX，412 是知识计算实验室；能上网即可
-      - id: campus_card
-        title: 领取校园卡
-        acceptance: 身份证+手机号+姓名发陈芃泽，南门师生活动中心 107 领；能进校
-      - id: desk
-        title: 确认工位与开门方式
-        acceptance: 问罗霖确认，知道「我的座位在哪」
-      - id: feishu_account
-        title: 登录飞书
-        acceptance: 能登录并看到团队群
-      - id: todo_account
-        title: 登录 TODO
-        acceptance: 能打开 TODO 库并能编辑
+# @人映射: acceptance/checker 里写 @名字 即渲染成 mention_user。
+# open_id 是海豚豚应用维度(open_id 按应用隔离, 换应用会报 cross app)。
+mentions:
+  罗霖: ou_a51a87a88f7e7d63e1c71972735b9d21
+  陈芃泽: ou_6e85a00eae290c21df7d32804f86ba6a
+  周熠: ou_e8b5136258d7d8dfed5d4858ef5e9ddb
+  张浩: ou_e96f2c2995f089a20f7f58d0870a78bb
+  郑伟丽: ou_1b531719e6c0d938ea8c8abe2990cd55
 
-  # ── 两处 🔗 必读材料 ───────────────────────────────────
-  - name: 必读材料
-    window_days: 3
+# 头部静态区。intro 行渲染成正文(带样式标记), partners 是可勾选条目
+# (进明细表, 模块名「我们喜欢的伙伴」, 窗口 1 天), 引导行渲染在 partners 前。
+header:
+  intro:
+    - {text: "👋 欢迎加入真知！这是你的入职卡", heading: true}
+    - {text: "逐项打勾即可，进度会自动同步给 HR，无需另行提交", grey: true}
+    - {text: "打勾不代表结束，一周后由小组长与 HR 验收你的实际表现，没做到的要补", grey: true}
+  partners_emoji: 🌟
+  partners_checker: 罗霖
+  sop_link: true
+  partners:
+    - {id: partner_drive, title: 极强自驱力, acceptance: 自己推着自己走，不用人盯}
+    - {id: partner_ai, title: AI Native 原生思维, acceptance: 遇到问题先问 AI 再问人}
+    - {id: partner_deliver, title: 交付靠谱、对结果负责, acceptance: 答应的事一定干成，对结果负责}
+
+# 文档尾部问答区 —— 纯静态内容, 不进明细表、不占进度、不参与催办。
+faq:
+  - q: "1. 怎么正确理解组织与你的关系？"
+    a:
+      - "双向投资人：组织投的“ 平台、算力、机会、试错的空间、成长的路径。”"
+      - "你投在组织的“ 把事做成的行动、对用户和业务真实的结果、你自己在变强。”"
+      - "一荣俱荣，一损俱损。 组织越好，你的平台越大；你成长越快，组织越强。我们不是互相消耗，是互相成为对方成长的杠杆。"
+  - {q: "2. 组织纪律性：工作进展、工作成果需要什么？", a: "及时汇报与同步：先说结论、不记流水账——日会、TODO（周一三五 15:00 前）、周六周会都是同步场合。"}
+  - {q: "3. 我不好意思打扰小组长，怎么办？", a: "小组长的职责就是帮你复盘、给你反馈；主动找 ta 是被鼓励的行为，ta 不会嫌烦。你不来找，ta 反而会担心你卡住了。"}
+  - q: "4. 被领导批评了，怎么办？"
+    a:
+      - "对事不对人：批评针对的是事情，不是否定你这个人。不要玻璃心。"
+      - "赶紧--**工作复盘--**~~核心原则：先认事实、不辩解，再找根因、落地改进，主动对齐组长获取建议，最后确认预防机制，不是单纯认错，重点是闭环，杜绝重复犯错。~~"
+  - q: "5. 什么叫“没有对齐”？"
+    a:
+      - "接任务当场确认三件事：做什么、什么标准、什么时候交；过程中有风险立即上报；交付前再核对一次——不一致或理解不一样那就是“没对齐”。"
+      - "##面临unknown unknowns怎么办？##"
+      - "给你一个方法：应该怎么问自己 ？   “这块我从没做过，我不确定还有什么没看到——能不能找做过的人对 30 分钟？”"
+  - q: "6. 日会不知道怎么汇报？"
+    a:
+      - "① 干成了什么：________（带数字/结论/结果——跟大目标/小目标的关系远了近了等，是结果不是过程，更不是流水账做了什么）"
+      - "② 证据：________（链接 / 数字 / 已验收 / 客户反馈）"
+      - "③ 下一步：________，____（时间）前给"
+      - "④ 卡点（已经发生——我现在卡住了）：卡在 ______，我试过 ______，需要 ______"
+      - "⑤ 风险（还没卡，但可能卡）：如果 ______，就会 ______"
+      - "**案例一：**"
+      - "① 干成了什么：____完成国数周报的交付____（带数字/结论/结果——跟大目标/小目标的关系远了近了等，是结果不是过程，更不是流水账做了什么）"
+      - "② 证据：____已交付国数方____（链接 / 数字 / 已验收 / 客户反馈）"
+      - "③ 下一步：__等待国数方的反馈，根据反馈结果来修复bug或提升用户体验______，__9.20__（时间）前给"
+      - "④ 卡点（已经发生——我现在卡住了）：卡在 _国数所给的etrust软件登录____，我试过 _询问国数方登录账号与密码_____，需要 _等待国数方开通账号交于我方，才可以查看使用反馈情况____"
+      - "⑤ 风险（还没卡，但可能卡）：如果 _国数方有其他周报修改的需求与bug反馈_____，就会 __需要重新训练构建交付的周报，需要二次返工____"
+      - "**案例二：**"
+      - "① 干成了什么：____todo list检查能用____（带数字/结论/结果——跟大目标/小目标的关系远了近了等，是结果不是过程，更不是流水账做了什么）"
+      - "② 证据：____海豚能帮忙检查todo list规范____（链接 / 数字 / 已验收 / 客户反馈）"
+      - "③ 下一步：____做好评测____，__9.20__（时间）前给"
+      - "④ 卡点（已经发生——我现在卡住了）：卡在 ___评测不规范___，我试过 ___按照自己的想法做评测___，需要 ___按照《Agent 能力评测全流程文档 v1.0》文档重新做一遍___"
+      - "⑤ 风险（还没卡，但可能卡）：如果 ___评测结果不好___，就会 ___需要对效果差的地方进行改进___"
+      - "**案例三：**"
+      - "① 干成了什么：__在ai场景测试当中，完成了测试数据集的搭建以及测试，并总结出测试结果，为技术部门进行产品的迭代提供了参考______（带数字/结论/结果——跟大目标/小目标的关系远了近了等，是结果不是过程，更不是流水账做了什么）"
+      - "② 证据：___已经将测试方案总结为模版放进Haitun agent知识库_____（链接 / 数字 / 已验收 / 客户反馈）"
+      - "③ 下一步：____可以扩大样本量____，____（时间）前给"
+      - "④ 卡点（已经发生——我现在卡住了）：卡在 ___测试方案存在问题___，我试过 __和师兄以及唐老师进行讨论____，需要 __再次修改方案____"
+      - "⑤ 风险（还没卡，但可能卡）：如果 __测试方案有问题____，就会 __影响最终的决策____"
+  - {q: "7. 任务做不完了，什么时候说？", a: "越早越好：遇到困难当场求助，有风险立即上报；deadline 前才说做不完是大忌。"}
+  - {q: "8. 遇到问题不知道问谁？", a: "默认找小组长。"}
+  - {q: "9. 公司制度哪里查？", a: "先问 Haitun，80% 的问题它秒答；它不知道的，会告诉你找谁。"}
+  - {q: "10. 动手前应该先问自己什么？", a: "这对我服务的用户有什么价值？（用户第一）"}
+  - {q: "11. 遇到风险或要延期，怎么办？", a: "提前说，不捂到最后。"}
+  - {q: "12. 手头活干完了，接下来干什么？", a: "主动问下一个任务，不等人催。"}
+  - q: "13. 飞书消息要怎么回？"
+    a: "尽快回复，信息务必实事求是，越重要的信息务必核实，尽量简明扼要的同时包含足够上下文，尽量分清场合分清对象针对性汇报。（来源：真知信息沟通SOP）"
+    links:
+      - {text: 真知信息沟通SOP, url: "https://genuineknowledge.feishu.cn/wiki/D3T9wdEQ1iRQsFkZO2ocwNZpnng"}
+  - {q: "14. 遇到问题先找谁？", a: "先问 Haitun，再问人。"}
+  - q: "15. 工资什么时候发？怎么考核？"
+    a: "每月 15 日发上月薪资；按 7:3 考核，系数 S/A/B/C/F。（来源：新人入职 SOP · 试运行）"
+    links:
+      - {text: 新人入职 SOP · 试运行, url: "https://genuineknowledge.feishu.cn/docx/BFs4dmCxkohnMVxP47vc7Exonxf"}
+  - q: "16. 正负面行为清单是什么？"
+    a: "一套陪你变好、变靠谱的自检与成长机制：记录你的成长值；负面清单是为了纠偏，同样是成长值；如果正负面清单无记录，你需要提高警惕了。（来源：正负面清单 SOP · 试运行）"
+    links:
+      - {text: 正负面清单 SOP · 试运行, url: "https://genuineknowledge.feishu.cn/wiki/MyUywH7bQiVncgkuYJLcBZjungc"}
+  - {q: "17. 怎么算「留下了」？", a: "2 周到 2 个月观察靠谱与向心力，通过后进战役大群；正负面清单是抓手。"}
+  - {q: "18. 入职登记要交什么？", a: "学历学位证书/学号、工作经历、家庭情况、体检报告；未如约上传的，一个月内补交。"}
+  - {q: "19. 如何融入集体？", a: "主动伸出手，别等别人来找你：日会周会认真听、也说说自己的进展；看到同事卡住主动帮一把；学习期周六主动出勤；愿意分享自己的成长与踩过的坑——融入不是被接纳，是你先成为其中的一员。"}
+  - {q: "20. API 怎么报销？", a: "在飞书提交报销审批，附上发票；报销金额要与实际消耗金额一致。"}
+
+modules:
+  # ── 模块一：靠谱之执行(7 个小组) ──────────────────────────
+  - name: 靠谱之执行
+    emoji: 🏃
+    checker: 罗霖
+    window_days: 7
+    groups:
+      - name: 到岗准备
+        emoji: 🏢
+        items:
+          - id: wifi
+            title: 连上 WiFi
+            acceptance: 404/412  KCL_in_GX / 密码：USTCKCL8-GX；能上网即可
+          - id: campus_card
+            title: 领取校园卡
+            acceptance: 身份证+手机号+姓名发@陈芃泽，带身份证到南门师生活动中心 107 领校园卡；能进校和食堂用餐
+            links:
+              - {text: 南门师生活动中心, url: "https://ditu.amap.com/ssr/place/B0I2LUE7EX?id=B0I2LUE7EX&source=map&name=%E4%B8%AD%E5%9B%BD%E7%A7%91%E5%AD%A6%E6%8A%80%E6%9C%AF%E5%A4%A7%E5%AD%A6%E9%AB%98%E6%96%B0%E6%A0%A1%E5%8C%BA%E5%B8%88%E7%94%9F%E6%B4%BB%E5%8A%A8%E4%B8%AD%E5%BF%83"}
+          - id: desk
+            title: 确认工位与开门方式
+            acceptance: 对接人@罗霖，知道「我的座位在哪」，实验室 A404 / A412
+      - name: 搞清楚谁是谁
+        emoji: 🤝
+        items:
+          - id: know_leader
+            title: 确认小组长
+            acceptance: 派活的人，打你 70% 成果分；管你成长，打你 30% 价值观分；入职后会主动来找你
+          - id: know_managers
+            title: 知道管理负责人是@周熠@张浩
+            acceptance: 决定谁留谁走
+          - id: know_functions
+            title: 记住三个赋能组对接人
+            acceptance: 人事找@罗霖、钱和社保找@郑伟丽、门禁合同找@陈芃泽
+          - id: task_intake
+            title: 接任务当场确认三件事
+            acceptance: 做什么、什么标准、什么时候交；困难求助、风险立即上报
+      - name: 登录账号
+        emoji: 🔑
+        items:
+          - id: login_feishu
+            title: 登录飞书
+            acceptance: 能登录并看到团队群
+          - id: login_todo
+            title: 登录 TODO
+            acceptance: 能打开 TODO 库并能编辑
+      - name: 考勤与请假
+        emoji: 🕐
+        items:
+          - id: attendance
+            title: 考勤规则
+            acceptance: 每天两次卡（上班 9:00 / 下班 19:00，午休 12:00-14:00）；每周 2 次免审批补卡；异常 3 个工作日内申诉；晚 21:00 后离开，次日 10:00 前到岗不计迟到。来源：新人入职 SOP · 试运行
+            links:
+              - {text: 新人入职 SOP · 试运行, url: "https://genuineknowledge.feishu.cn/docx/BFs4dmCxkohnMVxP47vc7Exonxf"}
+          - id: leave
+            title: 请假
+            acceptance: 走飞书「假勤」提交审批，审批通过才生效；口头请假无效
+      - name: 会议与节奏
+        emoji: 📅
+        items:
+          - id: weekly_rhythm
+            title: 记住每周节奏
+            acceptance: 周一三五上午参加每日对齐会；周一三五 15:00 前更新 TODO；周六 15:00 线下周会 A450
+          - id: meeting_number
+            title: 存好日会会议号
+            acceptance: agent 日会 10:00-10:45（571-5278-7045）；入口日会 10:45-11:15（485-2417-7690）；本体日会 11:15-12:00（426-5469-9903）；详情见日历
+      - name: 签署与红线
+        emoji: ✍️
+        items:
+          - id: sign_documents
+            title: 签完入职文件
+            acceptance: 信息登记表、协议/合同、保密协议、制度知悉确认书、两份签收页
+          - id: redlines
+            title: 七类红线
+            acceptance: 触碰了不是你不够好，是真知这条路不适合你，这次的合作关系只能到这里了。来源：新人入职 SOP · 试运行
+            links:
+              - {text: 新人入职 SOP · 试运行, url: "https://genuineknowledge.feishu.cn/docx/BFs4dmCxkohnMVxP47vc7Exonxf"}
+      - name: 工资与假期
+        emoji: 💰
+        items:
+          - id: payroll
+            title: 工资
+            acceptance: 每月 15 日发上月薪资，见飞书工资单
+          - id: annual_leave
+            title: 年假
+            acceptance: 按劳动法规定
+
+  # ── 模块二：靠谱之认真领会贯彻执行 ──────────────────────
+  - name: 靠谱之认真领会贯彻执行
+    emoji: 📖
+    checker: 罗霖
+    window_days: 7
     items:
-      - id: read_culture
-        title: 企业文化总则
-        url: https://genuineknowledge.feishu.cn/wiki/JyCLwr60lineYBkkJmQcZf0PnTb
-      - id: read_todo_spec
+      - {id: mission, title: 真知使命, acceptance: 让 AI 为用户按需赋能}
+      - {id: vision, title: 真知愿景, acceptance: 符号与连接融合引领 ASI（Artificial Super Intelligence）}
+      - {id: goal, title: 真知目标（当下）, acceptance: 做最牛的 Agent（LOM + LLM + Harness）}
+      - {id: culture_sop, title: 真知企业文化总则（简版）SOP, url: https://genuineknowledge.feishu.cn/wiki/JyCLwr60lineYBkkJmQcZf0PnTb}
+
+  # ── 模块三：7:3 原则释义 ──────────────────────────────────
+  - name: 7:3 原则释义
+    emoji: ⚖️
+    checker: 罗霖
+    window_days: 7
+    items:
+      - {id: only_standard, title: 唯一考核标准, acceptance: 每个考核周期按 100% 计，全部角色适用同一套标准，无豁免}
+      - {id: score_70, title: 70% 考核「外部客观成果」, acceptance: 所有的工作跟六类外部客观成果都应该有直接或间接关联，载体是 TODO}
+      - {id: score_30, title: 30% 考核「价值观与行动力」, acceptance: 即“怎么交付的”，以正负面清单记录的行为事实为依据，记录的都是成长值，两周内无任何记录的需重点关注并分析}
+      - {id: no_exemption, title: 全部角色适用同一套标准, acceptance: 无豁免}
+      - {id: talent_sop, title: 真知人才选拔、考核与晋升标准总则 SOP, url: https://genuineknowledge.feishu.cn/wiki/FqBiwivDEiZSAnkaHoXc3JvHnHf}
+
+  # ── 模块四：TODO 闭环(7 分) ────────────────────────────────
+  # flowchart: true 表示文档里在条目后插一张流程图图片(见 rookie_sop_card_send 的
+  # flowchart_image 参数; 图由 drawio/matplotlib 生成, 飞书 API 画不了真流程图)
+  - name: TODO 闭环（70% 外部客观成果）
+    emoji: 📝
+    checker: 小组长
+    window_days: 7
+    flowchart: true
+    items:
+      - id: todo_spec
         title: TODO list 规范与填写范例
         url: https://genuineknowledge.feishu.cn/wiki/KkJ8wstIZiD3Uck87PPcWgDdnmb
+        got_it_note: 会写合格的 TODO —— 大目标(3-6 月)→ 小目标(1 周-1 月)→ TODO(1-3 天)，层层拆解、每级写标准；写「什么时间干成满足什么标准的事」
 
-  # ── 第 1 件事：搞清楚谁是谁 ────────────────────────────
-  - name: 搞清楚谁是谁
-    window_days: 1
+  # ── 模块五：正负面清单闭环(3 分) ──────────────────────────
+  - name: 正负面清单闭环（30% 价值观与行动力）
+    emoji: 🔁
+    checker: 罗霖
+    window_days: 7
     items:
-      - id: know_leader
-        title: 确认小组负责人
-        acceptance: 派活的人，打你 70% 成果分
-      - id: know_mentor
-        title: 确认 Mentor
-        acceptance: 管你成长，打你 30% 价值观分；入职后会主动来找你
-      - id: know_managers
-        title: 知道管理负责人是张浩、周熠
-        acceptance: 决定谁留谁走
-      - id: know_functions
-        title: 记住三个行政对接人
-        acceptance: 人事找罗霖、钱和社保找郑伟丽、门禁合同找陈芃泽
+      - id: pn_fair
+        title: 公开 · 公平 · 全面
+        acceptance: 正负面清单的三个原则。来源：正负面清单 SOP · 试运行
+        links:
+          - {text: 正负面清单 SOP · 试运行, url: "https://genuineknowledge.feishu.cn/wiki/MyUywH7bQiVncgkuYJLcBZjungc"}
+      - id: pn_none
+        title: 无正负面清单记录
+        acceptance: 什么都不做、不暴露问题才是最糟的；同一负面清单不重复犯（有 3 次机会）
+      - id: pn_facts
+        title: 记录客观事实
+        acceptance: 写「时间 + 谁 + 在什么事上 + 怎么做的」，不写“很优秀、很积极”这类很主观的话
+      - id: pn_review
+        title: 工作复盘
+        acceptance: 核心原则：先认事实、不辩解，再找根因、落地改进，主动对齐组长获取建议，最后确认预防机制，不是单纯认错，重点是闭环，杜绝重复犯错
 
-  # ── 第 2 件事：每天怎么干活 ────────────────────────────
-  - name: 每天怎么干活
-    window_days: 2
+  # ── 模块六：公司现行 SOP ──────────────────────────────────
+  - name: 公司现行 SOP
+    emoji: 📚
+    checker: 罗霖
+    window_days: 7
     items:
-      - id: daily_rhythm
-        title: 记住每日节奏
-        acceptance: 9:00 打卡、10-11 点日会、12-14 午休、19:00 离岗前 Mentor 验收
-      - id: meeting_number
-        title: 存好日会会议号
-        acceptance: agent 日会 571-5278-7045；入口与本体日会 426-5469-9903
-      - id: weekly_rhythm
-        title: 记住每周节奏
-        acceptance: 周一三五 15:00 前更新 TODO；周六 15:00 线下周会 A450
-      - id: todo_writing
-        title: 会写合格的 TODO
-        acceptance: 做了什么 + 做到什么标准 + 截止时间，写「干成了什么」
-      - id: task_intake
-        title: 接任务当场确认三件事
-        acceptance: 做什么、什么标准、什么时候交；困难求助、风险立即上报
+      - id: smart_sop
+        title: 真知智能SOP
+        url: https://genuineknowledge.feishu.cn/wiki/UYQpwjkUVin4wjkJTnPcKnOUnZb
 
-  # ── 第 3-8 件事：制度类，每章一项「已阅读理解」──────────────
-  - name: 制度知晓
-    window_days: 3
-    items:
-      - id: understand_payroll
-        title: 工资和假期规则
-        acceptance: 每月 15 日发上月薪资；7:3 考核；系数 S/A/B/C/F
-      - id: understand_attendance
-        title: 考勤规则
-        acceptance: 每天两次卡；每周 2 次免审批补卡；异常 3 个工作日内申诉
-      - id: understand_positive_list
-        title: 正面行为清单
-        acceptance: 用户第一、实事求是等做到就能留下的行为
-      - id: understand_redlines
-        title: 六类红线
-        acceptance: 绝对不能碰的事，触碰即终止合作
-      - id: understand_probation
-        title: 怎么算「留下了」
-        acceptance: 2 周到 1 个月观察靠谱与向心力，通过后进战役大群
-      - id: sign_documents
-        title: 签完入职文件
-        acceptance: 信息登记表、协议/合同、保密协议、制度知悉确认书、两份签收页
-
-  # ── 第 2 件事末：研发专属 ──────────────────────────────
-  - name: 开发环境
+  # ── 模块七：开发人员请你这么干(研发专属) ──────────────────
+  - name: 开发人员请你这么干
+    emoji: 💻
+    checker: 张浩
     window_days: 7
     items:
       - id: role_confirmed
         title: 确认是否为技术人员
         acceptance: 点一下即可，非研发无需完成下面几项
-      - id: read_dev_spec
+      - id: dev_spec
         title: 真知开发规范 SOP
         url: https://genuineknowledge.feishu.cn/wiki/LXNYwmxaYiNcYDk9SHLc3xLEnAb
         dev_only: true
@@ -139,15 +301,25 @@ modules:
         title: 读项目的 AGENTS.md
         acceptance: 用 code agent 读；链接问小组负责人要
         dev_only: true
+      - id: code_graph
+        title: 点击看项目的框架
+        acceptance: 先看代码图谱了解整体结构,再深入代码(链接问小组负责人要)
+        links:
+          - {text: 看项目的框架, url: "http://47.100.84.197/code-graph/"}
+        dev_only: true
       - id: setup_dev_env
         title: 配好开发环境
         acceptance: clone 代码能跑起来
         dev_only: true
-      - id: git_workflow
+      - id: pr_workflow
         title: 知道怎么提 PR、谁 Code Review
         acceptance: 说得出流程与 reviewer
         dev_only: true
       - id: repo_access
         title: 开通仓库权限
         acceptance: 找小组负责人开通，能 push 代码
+        dev_only: true
+      - id: first_pr
+        title: 完成第一个 PR
+        acceptance: 认领 onboarding 任务 → 改代码 → 提 PR → 小组长 review → 合并；合并 = 本模块闭环
         dev_only: true

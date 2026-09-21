@@ -708,15 +708,15 @@ def _real_rows(items: Any, onboard: date, *, done_ids: set[str] | None = None) -
 
 
 def test_real_config_has_23_general_items_and_5_dev_only_items() -> None:
-    """钉死 V3 的数字: 22 个通用项 + role_confirmed + 5 个 dev_only = 28。
-    非研发分母 23, 研发分母 28。后面的分母测试都建立在这个前提上。"""
+    """钉死 V4 的数字: 36 个通用项 + role_confirmed + 7 个 dev_only = 43。
+    非研发分母 36, 研发分母 43。后面的分母测试都建立在这个前提上。"""
     items = _real_items()
     non_dev_only = [i for i in items if not i.dev_only]
     dev_only = [i for i in items if i.dev_only]
 
-    assert len(items) == 28
-    assert len(non_dev_only) == 23
-    assert len(dev_only) == 5
+    assert len(items) == 43
+    assert len(non_dev_only) == 36
+    assert len(dev_only) == 7
     assert any(i.item_id == "role_confirmed" for i in non_dev_only)
 
 
@@ -732,7 +732,7 @@ def test_day_one_denominator_with_real_config_is_28_because_dev_items_are_tickab
 
     got = p.summarize(rows, onboard)
 
-    assert got.total == 28
+    assert got.total == 43
     assert got.done == 0
     assert got.all_done is False
 
@@ -752,10 +752,10 @@ def test_applicable_total_after_nondev_is_23_with_role_confirmed_done() -> None:
     got = p.summarize(rows, onboard)
     applicable_ids = {i.item_id for i in cfg.applicable_items(items, "nondev")}
 
-    assert got.total == 23
+    assert got.total == 36
     assert got.done == 1
     assert "role_confirmed" in applicable_ids
-    assert len(applicable_ids) == 23
+    assert len(applicable_ids) == 36
 
 
 def test_applicable_total_after_dev_is_28_with_all_five_dev_items_live() -> None:
@@ -775,9 +775,9 @@ def test_applicable_total_after_dev_is_28_with_all_five_dev_items_live() -> None
     got = p.summarize(rows, onboard)
     applicable_ids = {i.item_id for i in cfg.applicable_items(items, "dev")}
 
-    assert got.total == 28
+    assert got.total == 43
     assert got.done == 1
-    assert len(applicable_ids) == 28
+    assert len(applicable_ids) == 43
     assert all(i.item_id in applicable_ids for i in items if i.dev_only)
 
 
@@ -790,7 +790,7 @@ def test_unanswered_role_card_cannot_graduate_even_with_every_general_item_done(
     items = _real_items()
     onboard = date(2026, 8, 5)
     general_done_ids = {i.item_id for i in items if not i.dev_only and i.item_id != "role_confirmed"}
-    assert len(general_done_ids) == 22  # 确保真的是「其余全做完」, 不是漏了几项
+    assert len(general_done_ids) == 35  # 确保真的是「其余全做完」, 不是漏了几项
 
     rows = _real_rows(items, onboard, done_ids=general_done_ids)
 
@@ -798,8 +798,8 @@ def test_unanswered_role_card_cannot_graduate_even_with_every_general_item_done(
 
     # 分母 28 = 22 通用 + role_confirmed + 5 开发项; 做完 22 个通用项后
     # 仍差 role_confirmed 与 5 个开发项, 所以 all_done 必须是 False。
-    assert got.total == 28
-    assert got.done == 22
+    assert got.total == 43
+    assert got.done == 35
     assert got.all_done is False
 
 
@@ -1491,12 +1491,16 @@ def test_decide_remind_stops_from_day_3_even_if_incomplete() -> None:
     p = _load("_rookie_sop_progress")
     rows = [_row("wifi", p.STATUS_TODO, date(2026, 8, 20))]
 
-    # 第 3-7 天: 只同步, 保留定时
-    for d in (3, 5, 7):
+    # 间隔日(第 3/5 天): 只同步, 保留定时
+    for d in (3, 5):
         got = rm.decide_remind(rows, date(2026, 8, 7), day_index=d)
         assert got["kind"] == "sync_only", f"day {d} 应只同步"
-    # 第 8 天起: 彻底停, 调用方据此自删
-    got = rm.decide_remind(rows, date(2026, 8, 7), day_index=8)
+    # 第 6 天(最后一天): 催办并通知 HR
+    got = rm.decide_remind(rows, date(2026, 8, 7), day_index=6, window_days=6)
+    assert got["kind"] == "remind"
+    assert got["notify_hr"] is True
+    # 窗口过后: 彻底停, 调用方据此自删
+    got = rm.decide_remind(rows, date(2026, 8, 7), day_index=7, window_days=6)
 
     assert got["kind"] == "stop"
 
@@ -1696,7 +1700,7 @@ def test_rookie_sop_remind_day2_skips_hr_feedback_when_hr_notify_id_is_empty(mon
     # 只发了给新人的那一张, 没有猜收件人补发 HR 卡
     assert len(sent) == 1
     assert sent[0][0] == "ou_x"
-    expected_reason = "hr_notify_id is empty in config/rookie_sop.yaml"
+    expected_reason = "no sender recorded and hr_notify_id is empty in config/rookie_sop.yaml"
     assert out["hr_feedback"] == {"ok": False, "sent": False, "reason": expected_reason}
 
 
@@ -1980,10 +1984,10 @@ def test_due_state_marks_late_today_and_future_differently() -> None:
 
 
 def test_card_template_is_green_on_day_one_and_red_on_day_two() -> None:
-    """入职卡只用红绿两色, 按**入职第几天**定, 不按每行 DDL。
+    """入职卡三色, 按**入职第几天**定(与 6 天窗口对齐), 不按每行 DDL。
 
-    Day 1 绿(还早)、Day 2 起红(最后一天/已超期)。全部做完一律绿。
-    刻意不再用橙/蓝: 需求就是红绿两色, 多一种颜色就多一层要解释的语义。
+    Day 1-4 绿(还早)、Day 5(倒数第二天)橙、Day 6+(最后一天)红。
+    全部做完一律绿 —— 做完了就没有紧迫可言。
     """
     c = _load("_rookie_sop_card")
     p = _load("_rookie_sop_progress")
@@ -2001,8 +2005,10 @@ def test_card_template_is_green_on_day_one_and_red_on_day_two() -> None:
         ]
 
     assert c._card_template(rows(), onboard) == "green"  # Day 1
-    assert c._card_template(rows(), date(2026, 8, 11)) == "red"  # Day 2
-    assert c._card_template(rows(), date(2026, 8, 12)) == "red"  # Day 3 仍红
+    assert c._card_template(rows(), date(2026, 8, 11)) == "green"  # Day 2 还早
+    assert c._card_template(rows(), date(2026, 8, 14)) == "orange"  # Day 5 倒数第二天
+    assert c._card_template(rows(), date(2026, 8, 15)) == "red"  # Day 6 最后一天
+    assert c._card_template(rows(), date(2026, 8, 16)) == "red"  # 超窗仍红
     assert c._card_template(rows(p.STATUS_DONE), date(2026, 8, 11)) == "green"  # 做完了就不紧迫
 
 
@@ -2593,14 +2599,14 @@ def test_link_item_unclear_still_counts_as_done_but_is_reported() -> None:
 
 
 def test_real_config_v3_has_the_three_required_readings() -> None:
-    """钉死 V3 的真实数字: 28 项、3 个必读链接、5 个 dev_only。"""
+    """钉死 V4 的真实数字: 43 项、5 个必读链接、7 个 dev_only。"""
     items = _real_items()
     links = [i for i in items if i.url]
     dev_only = [i for i in items if i.dev_only]
 
-    assert len(items) == 28
-    assert {i.item_id for i in links} == {"read_culture", "read_todo_spec", "read_dev_spec"}
-    assert len(dev_only) == 5
+    assert len(items) == 43
+    assert {i.item_id for i in links} == {"culture_sop", "talent_sop", "todo_spec", "dev_spec", "smart_sop"}
+    assert len(dev_only) == 7
     # 每个必读项都得有真链接, 不能留空
     assert all(i.url.startswith("https://") for i in links)
     # role_confirmed 仍是全员项(非 dev_only), 否则不答角色就能毕业
@@ -3167,27 +3173,32 @@ def test_entry_card_spells_out_the_deadline_in_both_tiers() -> None:
         return json.dumps(card, ensure_ascii=False)
 
     day1, _ = c.entry_card("王炜博", rows(), "https://doc", onboard)
-    day2, _ = c.entry_card("王炜博", rows(), "https://doc", onboard + timedelta(days=1))
-    day2_done, _ = c.entry_card("王炜博", rows("已完成"), "https://doc", onboard + timedelta(days=1))
+    day5, _ = c.entry_card("王炜博", rows(), "https://doc", onboard + timedelta(days=4))
+    day6, _ = c.entry_card("王炜博", rows(), "https://doc", onboard + timedelta(days=5))
+    day6_done, _ = c.entry_card("王炜博", rows("已完成"), "https://doc", onboard + timedelta(days=5))
 
-    # Day 1: 绿 + 明天之内
+    # Day 1-4: 绿 + 6 天窗口
     assert day1["header"]["template"] == "green"
-    assert "请在明天之内完成" in text_of(day1)
+    assert "请在入职 6 天内完成" in text_of(day1)
     assert "今天是最后一天" not in text_of(day1)
 
-    # Day 2: 红 + 今天最后一天
-    assert day2["header"]["template"] == "red"
-    assert "今天是最后一天" in text_of(day2)
+    # Day 5(倒数第二天): 黄 + 明天最后一天
+    assert day5["header"]["template"] == "orange"
+    assert "明天是最后一天" in text_of(day5)
 
-    # 两档都说清 HR 会来问, 且不用问责口吻
-    for card in (day1, day2):
+    # Day 6(最后一天): 红 + 今天最后一天
+    assert day6["header"]["template"] == "red"
+    assert "今天是最后一天" in text_of(day6)
+
+    # 绿/红档说清 HR 会来问, 且不用问责口吻
+    for card in (day1, day6):
         assert "HR 会来了解你是否遇到困难" in text_of(card)
         assert "上报" not in text_of(card)
         assert "通报" not in text_of(card)
 
     # 做完了不提时限也不提 HR
-    assert "明天之内" not in text_of(day2_done)
-    assert "HR 会来了解" not in text_of(day2_done)
+    assert "明天之内" not in text_of(day6_done)
+    assert "HR 会来了解" not in text_of(day6_done)
 
 
 def test_remind_card_day_two_mentions_hr_will_ask_why() -> None:
@@ -3212,10 +3223,17 @@ def test_remind_card_day_two_mentions_hr_will_ask_why() -> None:
     card, _ = c.remind_card("王炜博", 2, progress, "")
 
     rendered = json.dumps(card, ensure_ascii=False)
-    assert "HR 会来了解原因" in rendered
-    # 不用问责口吻
+    # 第 2 天是中档提醒: 说清每两天 HR 会看进度, 不吓唬
+    assert "每两天 HR 会看一次进度" in rendered
     assert "上报" not in rendered
     assert "通报" not in rendered
+
+    # 第 6 天(最后一天)才是红卡: HR 会来了解原因
+    card6, _ = c.remind_card("王炜博", 6, progress, "")
+    rendered6 = json.dumps(card6, ensure_ascii=False)
+    assert "HR 会来了解原因" in rendered6
+    assert "上报" not in rendered6
+    assert "通报" not in rendered6
 
 
 def test_resend_relinks_the_old_card_before_deleting_its_doc() -> None:

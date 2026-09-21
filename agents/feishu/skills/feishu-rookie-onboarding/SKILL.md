@@ -49,6 +49,8 @@ open_id；同名或查不到时向 HR 确认，不要猜。参考 `skills/feishu
 
 1. 姓名解析出 open_id 后，调 `rookie_sop_card_send`（`open_id` 必填，`name` 建议一并传，
    `event_payload_json`/`onboard_date` 留空即可，工具自己处理默认值）。
+   另传 `hr_open_id=<feishu_context 里的 sender_open_id>`（发卡人本人）——每两天的进度
+   抄送会优先发给发卡人；不传则回退 config 的 hr_notify_id。
 2. 通讯录事件触发时同样调这个工具，但场景参数留空，靠 Session 注入的 `event_payload_json`。
 3. 幂等：同一人重复调用复用已有明细行，不会写出两套，也不会重复建定时任务。
 4. 工具成功后卡片已可见：本轮**零 assistant 文本**（不要说「卡片已发送」）。

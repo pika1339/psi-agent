@@ -110,6 +110,7 @@ async def rookie_sop_card_send(
     onboard_date: str = "",
     force_resend: bool = False,
     fresh_start: bool = True,
+    hr_open_id: str = "",
 ) -> str:
     """Send a new hire the 入职卡 (entry card + per-person doc checklist).
 
@@ -131,6 +132,8 @@ async def rookie_sop_card_send(
         onboard_date: 'YYYY-MM-DD'; empty means today.
         force_resend: When true, re-send all module cards and re-create the
             reminder schedule even if detail rows already exist. Default False.
+        hr_open_id: 发卡人(HR)的 open_id —— 进度抄送优先发给他; 空则回退
+            config 的 hr_notify_id。agent 调用时把当前会话的 sender open_id 传进来。
     """
     payload = _store._parse_result(event_payload_json) if event_payload_json else {}
     resolved_open_id = (open_id or "").strip() or str(payload.get("open_id") or "").strip()
@@ -270,12 +273,20 @@ async def rookie_sop_card_send(
             "reused": True,
         }
     else:
+        # 流程图图片: config 里 flowchart_image 是相对 agent 包根的路径
+        # (发卡链路的 cwd 不定, 用 resolve_agent() 定死基准)。
+        image_path = ""
+        flow_rel = str(cfg.get("flowchart_image") or "").strip()
+        if flow_rel:
+            image_path = str(Path(_paths.resolve_agent()) / flow_rel)
         doc = await _docapi.provision_doc(
             feishu_api,
             open_id=resolved_open_id,
             name=resolved_name,
             rows=rows,
             sop_url=sop_url,
+            cfg=cfg,
+            image_path=image_path,
         )
     if not doc.get("document_id"):
         return json.dumps({"ok": False, "error": f"provision doc failed: {doc.get('error')}"}, ensure_ascii=False)
@@ -304,6 +315,14 @@ async def rookie_sop_card_send(
                     f"/open-apis/drive/v1/files/{stale}",
                     query_json=json.dumps({"type": "docx"}, ensure_ascii=False),
                 )
+
+    # 发卡人: 进度抄送(每两天)优先发给他 —— 谁发卡谁跟进; 没传则回退 config。
+    sender = (hr_open_id or "").strip()
+    if sender:
+        senders = state.get("senders")
+        senders = dict(senders) if isinstance(senders, dict) else {}
+        senders[resolved_open_id] = sender
+        state["senders"] = senders
 
     # 文档索引: 同步工具靠它反查是谁的清单。
     # 一人只留一条 —— 先清掉这个人名下的旧条目, 再写当前这份, 否则 docs 里会
