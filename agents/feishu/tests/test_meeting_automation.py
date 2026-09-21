@@ -1969,6 +1969,9 @@ async def test_analysis_requires_committed_rule_snapshots(tmp_path: Path, monkey
     assert "正负面分析规则" in positive_text
     assert "不得监听或自动分析" not in positive_text  # 注入的是快照, 不是私聊边界全文
     assert "负面候选三元组" in positive_text
+    # 会议概览就是周期性的正负面报告: 认知标准 (正负面都是同一个人的成长) 必须随快照一起注入,
+    # 否则概览会写回"正 vs 负"的对立叙事。
+    assert "## 认知标准" in positive_text
 
     broken = replace(job, analysis_sop_skills=("meeting-sop/not-shipped",))
     with pytest.raises(RuntimeError, match="会议 SOP skill 缺失"):

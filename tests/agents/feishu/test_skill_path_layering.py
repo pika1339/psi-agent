@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from functools import partial
 from pathlib import Path
 
 import anyio
@@ -101,7 +102,11 @@ def test_sop_skill_nearest_layer_wins(layers: tuple[Path, Path]) -> None:
 
     assert got is not None
     assert Path(str(got)) == nearer
-    assert anyio.run(got.read_text) == "企业覆盖"
+    # encoding 必须显式给: ``anyio.Path.read_text`` 和 ``pathlib`` 一样, 不传就用 locale 编码,
+    # 于是 UTF-8 落盘的中文在 cp936 的 Windows 上读回来是乱码 —— 而 CI 三个 job 全是
+    # ubuntu-latest(C.UTF-8), 这条断言在那里永远是绿的。判据只在这类机器上红, 所以判据自己
+    # 得先说清它读的是什么编码。
+    assert anyio.run(partial(got.read_text, encoding="utf-8")) == "企业覆盖"
 
 
 def test_sop_skill_missing_everywhere_returns_none(layers: tuple[Path, Path]) -> None:

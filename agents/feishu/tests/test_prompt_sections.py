@@ -241,6 +241,33 @@ def test_charting_guidance_names_the_type_and_colour_convention() -> None:
     assert "consistent across them" in guidance
 
 
+def test_chart_colour_pair_is_a_direction_not_a_verdict() -> None:
+    """正负面都算同一个人的成长, 所以那组色不能读成"好 / 坏"的判决。
+
+    The colour convention was added with the codes but not with a meaning. A report can
+    easily read 正面绿 / 负面红 as praise versus punishment — which is exactly the cognition
+    the 08-22 全员会 document corrects: 正向值得被看见、负向需要被纠正, and 纠偏本身也是成长值.
+    Keep the pair, but state what it means.
+    """
+    guidance = sections.DELIVERABLES_AS_FILES_SECTION
+
+    assert "direction" in guidance
+    assert "值得被看见" in guidance and "需要被纠正" in guidance
+    assert "成长记录" in guidance
+    assert "表扬 / 批评" in guidance
+    assert "加分 / 扣分" in guidance
+
+
+def test_tools_md_states_the_colour_pair_is_a_direction_not_a_verdict() -> None:
+    """TOOLS.md is the other surface the model reads; it must not disagree with the prompt."""
+    text = TOOLS_MD.read_text(encoding="utf-8")
+
+    assert "这组色是方向" in text
+    assert "不是判决" in text
+    assert "成长记录" in text
+    assert "表扬 / 批评" in text
+
+
 def test_tools_md_tells_the_model_that_charting_is_its_decision() -> None:
     """The prompt is not the only surface the model reads; TOOLS.md item 26 must agree."""
     text = TOOLS_MD.read_text(encoding="utf-8")

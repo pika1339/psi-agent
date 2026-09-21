@@ -1,4 +1,4 @@
-"""Versioned, deterministic positive-negative rule packs."""
+"""Versioned, deterministic positive-negative rule and cognition packs."""
 
 from __future__ import annotations
 
@@ -22,6 +22,13 @@ _SKILL_NAME = "positive-negative-list"
 
 #: 单根世界里的老落点。分层未声明时 ``_config_dirs`` 只产出这一个, 与改动前逐字节相同。
 _LEGACY_CONFIG_DIR = Path(__file__).resolve().parents[2] / "skills" / _SKILL_NAME
+
+#: 认知口径文件名。刻意与规则包同目录、同一套层解析: 两者都是技能内容, 落在一起才不会
+#: 出现"规则读到了就近那层、认知还停在老层"的偏斜 —— 那种偏斜正是认知标准悄悄失守的样子。
+_COGNITION_FILE = "cognition.yaml"
+
+#: 认知必须覆盖的三个方向。少一个方向就是口径不完整, 加载即失败关闭。
+COGNITION_DIRECTIONS = ("positive", "negative", "red_line")
 
 
 def _config_dirs() -> list[Path]:
@@ -114,6 +121,82 @@ class RulePack:
         return [entry.as_dict() for _, _, entry in scored[:limit]]
 
 
+@dataclass(frozen=True)
+class CognitionPack:
+    """正负面清单的关系认知: 清单是什么、正负面怎么读、报告怎么写。
+
+    这份口径**不是**代码里的常量。它与规则包同目录、同层解析, 由 ``positive_negative_rules``
+    与 ``positive_negative_case_analyze`` 读取后返回。这样做有两个直接后果: 改口径只改
+    ``cognition.yaml`` 一处, 不碰代码; "本轮读到的口径是哪一份字节"可以用
+    ``cognition_source()`` 的指纹证明, 而不必靠谁记得改过哪一行。
+
+    认知标准的关键一条是**正负面都算同一个人的成长**: 正向是履行创业者身份、值得被看见,
+    负向是信任基础被破坏、需要被纠正, 纠偏拿到的边界与改正路径同样是成长值。把清单讲成
+    "表扬 vs 批评"或"加分 vs 扣分"就是这个包要防的那个缺陷, 所以它必须可版本化、可追溯。
+    """
+
+    version: str
+    premise: str
+    order: str
+    source_document: dict[str, str]
+    relationship: dict[str, Any]
+    reading: dict[str, dict[str, str]]
+    stance: tuple[dict[str, str], ...]
+    ledger_discipline: tuple[str, ...]
+    report_rules: tuple[str, ...]
+    disclosure: str
+    notice: dict[str, str]
+
+    def notice_line(self, direction: str) -> str:
+        """员工侧通知卡的一句说辞, 按方向取; 缺失即 ``ValueError``。
+
+        卡片由代码确定性渲染, 拿不到 ``positive_negative_rules`` 的返回, 所以这一句是它唯一
+        的口径来源。刻意**不给兜底文案** —— 兜底就等于在代码里偷偷留下第二份口径, 而"负面卡
+        只列整改三条、没有成长框架"正是这次要修的那个读法。
+        """
+        line = self.notice.get(direction, "")
+        if not line:
+            raise ValueError(f"cognition pack notice missing: {direction}")
+        return line
+
+    def as_dict(self) -> dict[str, Any]:
+        """完整口径, 含版本与出处。给需要判断依据的调用方。"""
+        return {
+            "version": self.version,
+            "premise": self.premise,
+            "order": self.order,
+            "source_document": dict(self.source_document),
+            "relationship": self.relationship,
+            "reading": {direction: dict(entry) for direction, entry in self.reading.items()},
+            "stance": [dict(item) for item in self.stance],
+            "ledger_discipline": list(self.ledger_discipline),
+            "report_rules": list(self.report_rules),
+            "disclosure": self.disclosure,
+            "notice": dict(self.notice),
+        }
+
+    def report_view(self) -> dict[str, Any]:
+        """面向用户的投影: 只有中文业务表述, 不带版本号、内部字段名或文件路径。
+
+        汇总结果会直接进对话, 所以这里刻意**不复用** ``as_dict()`` —— 那条路会把 ``version``
+        之类的内部标识带进用户可见的返回。也刻意**不在代码里拼句子**: 每一条的正文原样来自
+        ``cognition.yaml``, 代码只换一层中文键名。拼句子意味着标点与措辞住进代码, 而口径
+        恰恰是最常被改的那部分。
+        """
+        return {
+            "认知口径": {
+                "前提": self.premise,
+                "关系": self.relationship,
+                "正向清单": dict(self.reading.get("positive", {})),
+                "负面清单": dict(self.reading.get("negative", {})),
+                "红线": dict(self.reading.get("red_line", {})),
+                "台账纪律": list(self.ledger_discipline),
+                "报告怎么写": list(self.report_rules),
+            },
+            "说明": self.disclosure,
+        }
+
+
 def _layer_name_of(path: Path) -> str:
     """``path`` 命中的内容层名; 落在老落点上返回 ``"legacy"``。
 
@@ -126,6 +209,11 @@ def _layer_name_of(path: Path) -> str:
     return "legacy"
 
 
+def _skill_file(filename: str) -> Path | None:
+    """技能目录下的一个文件, 按内容层就近解析; 全层未命中返回 ``None``。"""
+    return next((d / filename for d in _config_dirs() if (d / filename).is_file()), None)
+
+
 def _rule_pack_path(version: str) -> Path:
     """规则包文件, 按内容层就近解析; 全层未命中抛 ``ValueError``。
 
@@ -135,9 +223,22 @@ def _rule_pack_path(version: str) -> Path:
     """
     if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+(?:-[a-z0-9-]+)?", version):
         raise ValueError("invalid rule pack version")
-    path = next((p for d in _config_dirs() if (p := d / f"{version}.yaml").is_file()), None)
+    path = _skill_file(f"{version}.yaml")
     if path is None:
         raise ValueError(f"unknown rule pack version: {version}")
+    return path
+
+
+def _cognition_path() -> Path:
+    """认知口径文件, 与规则包共用同一个解析口。
+
+    缺失时**失败关闭**, 不给兜底: 没有这份口径, "正负面都是成长"就没有判据, 让工具带着一份
+    代码里自造的认知继续跑, 正是这次要修的那个缺陷。错误文案刻意不带路径 —— 这个模块的错误
+    会原样进 agent 的返回, 服务器目录结构不该跟着出去。
+    """
+    path = _skill_file(_COGNITION_FILE)
+    if path is None:
+        raise ValueError("cognition pack unavailable")
     return path
 
 
@@ -161,6 +262,17 @@ def query_rules(query: str, version: str = DEFAULT_VERSION, limit: int = 8) -> l
     return load_rule_pack(version).query(query, limit)
 
 
+def _skill_fingerprint(path: Path, relative: str) -> dict[str, Any]:
+    """技能文件的来源指纹: ``{file, layer, sha256, bytes}``。"""
+    raw = path.read_bytes()
+    return {
+        "file": relative,
+        "layer": _layer_name_of(path),
+        "sha256": hashlib.sha256(raw).hexdigest()[:12],
+        "bytes": len(raw),
+    }
+
+
 def rule_pack_source(version: str = DEFAULT_VERSION) -> dict[str, Any]:
     """规则包来源指纹: ``{file, sha256, bytes}``。
 
@@ -178,14 +290,17 @@ def rule_pack_source(version: str = DEFAULT_VERSION) -> dict[str, Any]:
     ``sha256`` 只取前 12 位 —— 够区分且好念。刻意**不**返回全文: 这个字段是给"比对"用的,
     不是给"读"用的。
     """
-    path = _rule_pack_path(version)
-    raw = path.read_bytes()
-    return {
-        "file": f"skills/{_SKILL_NAME}/{version}.yaml",
-        "layer": _layer_name_of(path),
-        "sha256": hashlib.sha256(raw).hexdigest()[:12],
-        "bytes": len(raw),
-    }
+    return _skill_fingerprint(_rule_pack_path(version), f"skills/{_SKILL_NAME}/{version}.yaml")
+
+
+def cognition_source() -> dict[str, Any]:
+    """认知口径来源指纹, 形状与 ``rule_pack_source`` 相同。
+
+    认知也要指纹, 理由和规则包一样: SKILL 要求 agent 在"本轮确实重读了、口径未变"时给出
+    证据, 而口径文本随时可能被改。只报文件名证明不了读的是哪一层的哪一份字节, 所以
+    ``layer`` 与 ``sha256`` 一起给。
+    """
+    return _skill_fingerprint(_cognition_path(), f"skills/{_SKILL_NAME}/{_COGNITION_FILE}")
 
 
 def validate_rule_pack(pack: RulePack) -> None:
@@ -243,6 +358,113 @@ def _entry_from_mapping(item: dict[str, Any]) -> RuleEntry:
         trigger_conditions=seq("trigger_conditions") if item.get("trigger_conditions") else (),
         escalation_conditions=seq("escalation_conditions") if item.get("escalation_conditions") else (),
     )
+
+
+def load_cognition_pack() -> CognitionPack:
+    """读取认知口径。文件缺失即失败关闭(见 ``_cognition_path``)。"""
+    raw = yaml.safe_load(_cognition_path().read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("cognition pack must be a mapping")
+    version = raw.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError("cognition pack version missing")
+    reading = raw.get("reading")
+    if not isinstance(reading, dict):
+        raise ValueError("cognition pack reading missing")
+    pack = CognitionPack(
+        version=version,
+        premise=str(raw.get("premise") or ""),
+        order=str(raw.get("order") or ""),
+        source_document=_string_mapping("source_document", raw.get("source_document")),
+        relationship=_object_mapping("relationship", raw.get("relationship")),
+        reading=_reading_mapping(reading),
+        stance=_object_sequence("stance", raw.get("stance")),
+        ledger_discipline=_text_sequence("ledger_discipline", raw.get("ledger_discipline")),
+        report_rules=_text_sequence("report_rules", raw.get("report_rules")),
+        disclosure=str(raw.get("disclosure") or ""),
+        notice=_string_mapping("notice", raw.get("notice")),
+    )
+    validate_cognition_pack(pack)
+    return pack
+
+
+def validate_cognition_pack(pack: CognitionPack) -> None:
+    """口径完整性: 少一条就失败关闭, 不让残缺的口径被当成完整口径用。
+
+    刻意**不**给缺项兜底默认值。缺一角的认知 (例如只写了正向怎么写、没写负向同样算成长)
+    恰恰会复现这次要修的那个缺陷, 而一个补了默认值的加载器会让它静默通过。
+    """
+    if not isinstance(pack, CognitionPack):
+        raise ValueError("invalid cognition pack")
+    missing = [name for name in ("version", "premise", "order", "disclosure") if not getattr(pack, name)]
+    if missing:
+        raise ValueError(f"cognition pack fields missing: {', '.join(missing)}")
+    if not pack.relationship or not pack.ledger_discipline or not pack.report_rules:
+        raise ValueError("cognition pack relationship, ledger discipline, or report rules missing")
+    for direction in COGNITION_DIRECTIONS:
+        entry = pack.reading.get(direction)
+        if not entry:
+            raise ValueError(f"cognition pack reading missing: {direction}")
+        for field in ("label", "translates", "organizational_response", "growth"):
+            if not entry.get(field):
+                raise ValueError(f"cognition pack reading incomplete: {direction}/{field}")
+    # 通知卡两个方向各要一句: 只有正向那句时, 负面卡会退回"只列整改三条"。
+    for direction in ("positive", "negative"):
+        if not pack.notice.get(direction, ""):
+            raise ValueError(f"cognition pack notice missing: {direction}")
+
+
+def _string_mapping(name: str, value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{name} must be a non-empty mapping")
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str) or not item:
+            raise ValueError(f"{name} must map strings to non-empty strings")
+        result[key] = item
+    return result
+
+
+def _object_mapping(name: str, value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{name} must be a non-empty mapping")
+    return value
+
+
+def _object_sequence(name: str, value: Any) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{name} must be a non-empty list")
+    items: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or not item:
+            raise ValueError(f"{name} entries must be non-empty mappings")
+        entry: dict[str, str] = {}
+        for key, text in item.items():
+            if not isinstance(key, str) or not isinstance(text, str) or not text:
+                raise ValueError(f"{name} entries must map strings to non-empty strings")
+            entry[key] = text
+        items.append(entry)
+    return tuple(items)
+
+
+def _text_sequence(name: str, value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{name} must be a non-empty string list")
+    return tuple(value)
+
+
+def _reading_mapping(value: dict[str, Any]) -> dict[str, dict[str, str]]:
+    reading: dict[str, dict[str, str]] = {}
+    for direction, entry in value.items():
+        if not isinstance(direction, str) or not isinstance(entry, dict) or not entry:
+            raise ValueError("cognition reading entries must be non-empty mappings")
+        fields: dict[str, str] = {}
+        for key, text in entry.items():
+            if not isinstance(key, str) or not isinstance(text, str) or not text:
+                raise ValueError(f"cognition reading must map strings to non-empty strings: {direction}")
+            fields[key] = text
+        reading[direction] = fields
+    return reading
 
 
 def _normalize(value: str) -> str:

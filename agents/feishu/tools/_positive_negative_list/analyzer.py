@@ -83,7 +83,6 @@ def analyze_records(records: Sequence[LedgerRecord], focus: str = "") -> dict[st
         "review_gaps": review_gaps,
         "attention_records": attention_records,
         "focus": focus,
-        "non_performance_statement": "本分析仅用于理解记录和后续沟通，不产生分数、排名或绩效结论。",
     }
 
 
@@ -95,6 +94,13 @@ def user_summary(records: Sequence[LedgerRecord], focus: str = "") -> dict[str, 
     model, so exposing that mapping would invite it to repeat rule IDs,
     pagination cursors, or storage field names.  This projection contains
     only Chinese business labels and counts.
+
+    It carries **no** disclosure or framing sentence of its own.  ``说明`` and
+    the ``认知口径`` block (both are the cognition standard, i.e. content) come
+    from ``skills/positive-negative-list/cognition.yaml`` and are merged in by
+    ``positive_negative_case_analyze``.  Writing either one back into this
+    module would put the standard back inside the code, where revising it means
+    a release instead of a content edit.
     """
     internal = analyze_records(records, focus)
     nature_counts = internal["nature_counts"]
@@ -123,7 +129,6 @@ def user_summary(records: Sequence[LedgerRecord], focus: str = "") -> dict[str, 
         "分类统计": [{"分类": category, "记录数": count} for category, count in sorted(category_counts.items())],
         "需要关注的记录": attention,
         "分析范围": focus,
-        "说明": "本分析仅用于理解记录和后续沟通，不产生分数、排名或绩效结论。",
     }
 
 

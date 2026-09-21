@@ -487,7 +487,9 @@ async def _analyze_meeting_transcript(
         if sop_rules.strip():
             parts.append(f"会议 SOP 规则(版本化快照):\n{sop_rules}")
         if positive_rules.strip():
-            parts.append(f"正负面分析规则(快照):\n{positive_rules}")
+            # 这份快照同时承载"认知标准" (正负面都是同一个人的成长) 与分析规则。标签要说清它是什么,
+            # 否则模型容易只把它当成一张判定规则表, 概览又写回"正 vs 负"的对立叙事。
+            parts.append(f"正负面口径(快照: 认知标准 + 分析规则):\n{positive_rules}")
         return "\n\n".join(parts)
 
     async def _counted_call(system_prompt: str, user_content: str) -> Any:

@@ -14,7 +14,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import _feishu_impl as _f
-from _positive_negative_list import analyzer, reader, runtime
+from _positive_negative_list import analyzer, reader, rules, runtime
 from _positive_negative_list.models import LedgerRecord
 
 
@@ -36,6 +36,12 @@ async def positive_negative_case_analyze(
         JSON containing a Chinese user-facing summary.  Pagination cursors,
         storage field names, rule IDs, and other implementation metadata stay
         inside this tool and are never returned to the chat model.
+
+        The summary carries a ``认知口径`` block read from
+        ``skills/positive-negative-list/cognition.yaml``: 正面 and 负面 are both
+        one person's growth, and the report is written along that line.  A
+        summary without it is the defect this block exists to prevent, so the
+        cognition is loaded and validated before any aggregation is returned.
     """
     try:
         if records_json.strip():
@@ -61,7 +67,9 @@ async def positive_negative_case_analyze(
                     return _f.dumps_result({"ok": False, "error": "table pagination cursor did not advance"})
                 seen_tokens.add(next_token)
                 query = replace(query, page_token=next_token)
-        result = {"ok": True, **analyzer.user_summary(records, focus)}
+        # 口径在聚合之后、返回之前注入, 且整块原样来自 cognition.yaml —— 说明文字与
+        # "报告怎么写"都不在这份代码里, 改口径不需要动这个文件。
+        result = {"ok": True, **analyzer.user_summary(records, focus), **rules.load_cognition_pack().report_view()}
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         result = {"ok": False, "error": str(exc)}
     except (OSError, RuntimeError) as exc:

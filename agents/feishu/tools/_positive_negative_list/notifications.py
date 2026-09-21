@@ -17,6 +17,7 @@ import anyio
 from _assignment_display import resolve_people_display
 from loguru import logger
 
+from _positive_negative_list import rules
 from _positive_negative_list.models import CaseDraft, LedgerRecord
 
 
@@ -140,6 +141,8 @@ def _record_notice_text(record: LedgerRecord, subject_display: str = "姓名未�
     if record.evidence_sources:
         lines.append(f"证据来源：{'、'.join(record.evidence_sources)}")
     if record.nature == "negative":
+        # 与卡片同一条口径: 成长框架先于整改三条, 文案原样来自 cognition.yaml。
+        lines.append(rules.load_cognition_pack().notice_line("negative"))
         lines.extend(
             (
                 f"正确做法：{record.correct_behavior or '发现问题后及时同步现状、影响和补救方案'}",
@@ -150,7 +153,7 @@ def _record_notice_text(record: LedgerRecord, subject_display: str = "姓名未�
             )
         )
     else:
-        lines.append("这条记录用于沉淀可复用的工作方式，感谢你的实践和贡献。")
+        lines.append(rules.load_cognition_pack().notice_line("positive"))
     return "\n".join(lines)
 
 
@@ -180,6 +183,10 @@ def render_record_notice_card(record: LedgerRecord, subject_display: str, *, not
     """Render the employee-facing notice with the PR #843 Card 2.0 grammar."""
     negative = record.nature == "negative"
     nature = "负面行为" if negative else "正面行为"
+    # 卡片由代码确定性渲染, 拿不到工具返回的认知口径, 所以员工侧说辞从 cognition.yaml 取。
+    # 加载失败即抛出, 不给兜底文案 —— 兜底会在代码里留下第二份口径, 而"负面卡只列整改三条"
+    # 正是这次要修的那个读法。
+    cognition = rules.load_cognition_pack()
     elements: list[dict[str, Any]] = [
         {
             "tag": "markdown",
@@ -190,6 +197,9 @@ def render_record_notice_card(record: LedgerRecord, subject_display: str, *, not
         {"tag": "markdown", "content": f"**发生时间**　{record.occurred_at}　·　**分类**　{record.category}"},
     ]
     if negative:
+        # 成长框架放在整改三条**之前**: 先说这是一条成长记录, 再给改正路径。只讲"哪里错了 +
+        # 怎么改"读起来是罚单, 而不是成长。
+        elements.append({"tag": "markdown", "content": cognition.notice_line("negative")})
         elements.extend(
             [
                 {
@@ -209,7 +219,7 @@ def render_record_notice_card(record: LedgerRecord, subject_display: str, *, not
             ]
         )
     else:
-        elements.append({"tag": "markdown", "content": "这条记录用于沉淀可复用的工作方式，感谢你的实践和贡献。"})
+        elements.append({"tag": "markdown", "content": cognition.notice_line("positive")})
     if negative:
         elements.extend(
             [

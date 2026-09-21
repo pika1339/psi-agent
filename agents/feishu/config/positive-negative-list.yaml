@@ -1,7 +1,9 @@
 # 正负面清单（PNL）引用与运行配置 —— 用户/产品可编辑，工具按需读取。
 # 与 todo-sop.yaml 同模式：字段名与结构是契约，不要改；换表/换文档/换口径只改值。
 # 文件缺失或损坏时，代码回落内置默认（正式表坐标与六列映射写死在 runtime.py），并记录告警。
-# 员工侧规则文本仍以 SKILL.md 与 skills/positive-negative-list/6.0-shadow.yaml 为准。
+# 员工侧规则文本以 SKILL.md 与 skills/positive-negative-list/6.0-shadow.yaml 为准;
+# 认知口径（清单是什么、正负面怎么读、报告怎么写）以同目录的 cognition.yaml 为准，
+# 工具经 positive_negative_rules 的 cognition 字段读取并返回。
 
 ledger:
   # 租户 Web 域名, 用于拼接员工可见的记录链接(默认 genuineknowledge.feishu.cn); 换租户只改这里。
@@ -41,6 +43,16 @@ documents:
       判定口径与分类规则的唯一出处。员工追问判断依据时，只提供章节位置或本链接的原文，
       不展示内部规则 ID、版本号或字段名。章节要点（分类顺序/唯一主条目/事实与证据标准/
       员工侧表达/红线人工处理）在 SKILL.md 中与 SOP 同源维护。
+  cognition:
+    name: 正负面清单执行方案 · 之关系认知
+    url: https://genuineknowledge.feishu.cn/docx/Shc6dwJGgoFSIkxv4mHcqnUnnnh
+    pack: skills/positive-negative-list/cognition.yaml
+    notes: >
+      认知口径的出处：清单是关系的"行为翻译"，正负面都是同一个人的成长（正向值得被看见、
+      负向需要被纠正，纠偏同样是成长值）。**可执行的认知文本存放在 pack 指向的
+      cognition.yaml** —— 工具经 `positive_negative_rules` 的 `cognition` 字段读取并给出
+      `cognition_source` 指纹，报告侧由 `positive_negative_case_analyze` 的 `认知口径` 字段返回。
+      本条目只登记出处链接：要给员工看原文时用这里的 url，改口径改 pack 的内容，不改本文件的字段结构。
   ledger:
     name: 正负面清单正式总表
     url: https://genuineknowledge.feishu.cn/base/RNEvbLIJAaPPdksfv8YceTmjndg?table=tblwXV7Xlwu0hVYH&view=veweChthHV
