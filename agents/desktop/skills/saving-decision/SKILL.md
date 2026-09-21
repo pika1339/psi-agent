@@ -65,7 +65,7 @@ Output Contract: the final answer must be plain user-readable text starting dire
 - In saving tasks, looking up policy parameters: call policy_query (pass category, region) to get the 2026 basis (rate / cap / threshold / energy-efficiency) with 2025 for comparison; then verify provincial details against official sources as needed.
 - In saving tasks, finding candidates (recommendation / guide / shopping): call review_search (pass category, budget, constraints, region) and extract models / prices / sources from the returned candidate articles.
 - In saving tasks, tools return JSON - use by field; if a tool is unavailable or returns empty, mark [Cannot Confirm] and fall back to the honesty templates; never fabricate.
-- In saving tasks involving local consumption vouchers: call voucher_clues (pass city, optional category) to get candidate pages, then OPEN them and read the actual terms. The tool returns leads only (title / date / link) and deliberately does not extract amount / threshold / scope - inferring "满500减50" from a title is exactly how a fabricated rule gets made.
+- In saving tasks involving local consumption vouchers: call voucher_clues (pass city, optional category) to get candidate pages, then OPEN them and read the actual terms. The tool returns leads only (title / date / link) and deliberately does not extract amount / threshold / scope - inferring "满500减50" from a title is exactly how a fabricated rule gets made. Then, having copied those terms VERBATIM off the page, call voucher_rules to turn the drafts into engine rules and pass its `rules` straight into saving_calc. Do not do the threshold comparison or the arithmetic yourself - that middle step exists precisely so you do not have to.
 
 ## Local Consumption Vouchers (地方消费券, A2)
 
@@ -78,6 +78,26 @@ sourcing discipline is stricter, not looser.
   `paths`. **One path failing does not mean there are no vouchers** - read `paths` before concluding anything,
   and only when all three are empty does it return `ok=false`. Then open the pages and read amount /
   threshold / scope / validity; cite the page, not the search result.
+  - Every clue's `url` is an absolute address you can open directly. Open that page; do not re-derive it from
+    the title, and do not substitute a search-engine result page for it.
+- **`voucher_clues` -> the page -> `voucher_rules` -> `saving_calc`.** The chain is
+  clues / rules / money, and the middle step is not optional. After reading a page, build one draft per
+  voucher: `原文` (the page's own wording, e.g. `满30减7.8元`), `来源`, `核验于`, and `有效期{起,止}` - plus
+  `适用品类` / `适用城市` / `领取渠道` / `可叠加` when the page states them. `voucher_rules` parses
+  threshold / amount / discount out of `原文` and returns `rules`, which are passed straight to `saving_calc`.
+  - It enforces three hard gates - source, verification date, validity window - and a voucher failing any of
+    them lands in `missing`, **not** in `rules`. That is deliberate: in the engine "no window" means "valid
+    forever", so an unreadable expiry would turn an expired voucher into a claimable one. Go back to the page
+    for what is missing; **never fill the gaps with defaults or plausible values.**
+  - Never hand-compute the result or eyeball whether a threshold is met. If you catch yourself comparing
+    "满500减50" against a cart total in your head, that is the fabrication this chain exists to prevent.
+- **能用 is normally NOT reachable for local vouchers - say so instead of faking it.** Constraint 9 defines
+  能用 as "the voucher is held AND the checkout page says it applies". Local vouchers are held in a wallet app
+  (中国银行APP / 微信卡包 / 云闪付) with no web entry, and they are redeemed **offline at a merchant** - so
+  there is no checkout page to consult. In practice you will only ever establish 能领 or 已失效 for a local
+  voucher. Report the state you can actually evidence and state plainly that the third is not verifiable here;
+  **never upgrade a voucher to 能用 because it looks like it ought to apply.** (This is the A2 counterpart of
+  the national-subsidy checkout rule: there, the checkout page settles it; here, nothing does.)
 - **A clue's date is the ARTICLE's date, not the voucher's validity.** Every clue carries `published` and
   `clue_freshness`: `current` (article <=30d) / `recent` (<=180d) / `stale` / `undated`. `stale` vouchers have
   usually finished issuing, and `undated` is **not** "new". Lead with what is `current`; if nothing is, say so

@@ -585,3 +585,67 @@ async def test_search_runs_every_template_not_just_the_first_hit(monkeypatch: py
     assert len(calls) == 2, f"两个模板都该跑, 实际: {calls}"
     assert len(got) == 2, "两个模板的结果都要合并进来"
     assert why == ""
+
+
+# --------------------------------------------------------------------------- #
+# 9. 线索的 `url` 必须**能直接打开** —— 相对路径不是 URL
+# --------------------------------------------------------------------------- #
+#
+# 这一段是 2026-09-21 端到端实测之后补的, 起因是一个只有真跑一遍才会露出来的缺陷:
+# 官方列表与聚合站给的 href 都是**站内相对路径**(`/news/123/2026/9/xxx.html`), 两条路
+# 都没把它拼成绝对地址。而线索的**全部用处**就是"agent 打开这一页去抄条款" —— 相对路径
+# 交给浏览器是按当前页解析的, 轻则 404; 而 404 看起来跟"这里没有券"一模一样, 正好是本
+# 场景最贵的那类静默错误。
+#
+# 为什么原来的判据没兜住: 一处夹子用的是**绝对** href, 另一处只断言 `title` 不断言 `url`。
+# 所以下面除了两条分路的判据, 还有一条**通用判据** —— 不管哪一路来的 url, 都得是绝对的。
+
+
+def test_parse_clues_resolves_relative_hrefs() -> None:
+    """聚合路的相对 href 要按**抓这一页的地址**拼成绝对地址; 本来就是绝对的别去动它。"""
+    html = (
+        "<html><body>"
+        '<a href="/news/123/2026/9/a.html">合肥市发放新一轮消费券 2026-09-10</a>'
+        '<a href="https://other.example.com/b.html">合肥市餐饮消费券 2026-09-11</a>'
+        "</body></html>"
+    )
+
+    out = _voucher_clues._parse_clues(html, TODAY, "https://m.hf.bendibao.com/news/zhuantixiaofeiquan/")
+
+    # 按 title -> url 比, 不依赖顺序: `_parse_clues` 出来是按日期倒序的, 顺序不是本判据要说的
+    # 那件事(那条另有判据)。
+    assert {c["title"]: c["url"] for c in out} == {
+        "合肥市发放新一轮消费券": "https://m.hf.bendibao.com/news/123/2026/9/a.html",
+        "合肥市餐饮消费券": "https://other.example.com/b.html",
+    }
+
+
+async def test_official_clues_resolve_without_a_host_url_key(page: Any) -> None:
+    """官方路的相对 href 靠**实际抓的那一页**解析, 不靠注册表里的 `host_url`。
+
+    这里刻意**不给 `host_url`** —— 出厂注册表里本来就没有这个键。原先的实现写成
+    `entry["host_url"] + href`, 于是恒等于 `"" + href`, 前缀是死代码; 而它还一直绿着,
+    只因为夹子自己传了 `host_url`。判据必须照着**出厂的形状**来喂输入。
+    """
+    page('<html><body><a href="/news/123/2026/9/c.html">合肥市发放新一轮消费券 2026-09-10</a></body></html>')
+    entry = {"list_url": "https://example.gov.cn/saleinfo/page{n}.html"}
+
+    out = await _voucher_clues._official_clues(entry, "合肥", "", 1, TODAY)
+
+    assert [c["url"] for c in out] == ["https://example.gov.cn/news/123/2026/9/c.html"]
+
+
+async def test_every_clue_url_is_openable(page: Any) -> None:
+    """**通用判据**: 不管哪一路来的线索, `url` 都得是能直接打开的绝对地址。
+
+    夹子里故意只用相对 href —— 真实渠道就是这么给的。这条判据与"哪一路"无关, 所以以后
+    再加渠道时, 只要它忘了归一化, 这里就会红。
+    """
+    page('<html><body><a href="/news/123/2026/9/a.html">合肥市发放新一轮消费券 2026-09-10</a></body></html>')
+
+    data = await _call(city="合肥")
+
+    clues = data["clues"]
+    assert clues, "这个夹子本该至少产出一条线索, 否则判据本身失效了"
+    bad = [(c["via"], c["url"]) for c in clues if not str(c["url"]).startswith("http")]
+    assert not bad, f"这些线索的 url 打不开: {bad}"

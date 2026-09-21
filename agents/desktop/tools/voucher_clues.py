@@ -39,6 +39,7 @@ import json
 import re
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import urljoin
 
 import _voucher_sources as _sources
 import aiohttp
@@ -149,7 +150,25 @@ async def _fetch(url: str, total_seconds: float = 25.0) -> str | None:
         return None
 
 
-def _parse_clues(html: str, today: date) -> list[dict[str, Any]]:
+def _absolute(href: str, base: str) -> str:
+    """把 href 拼成**能直接打开**的绝对 URL。
+
+    这一步是必需的, 不是收拾门面: 线索的用处就是"agent 打开这一页去抄条款", 而官方列表与
+    聚合站给的 href 都是站内相对路径(`/news/123/2026/9/xxx.html`)。相对路径交给浏览器就是
+    相对**当前页**解析 —— 轻则 404, 重则落到别的站上, 而 404 看起来和"这里没有券"一模一样。
+
+    2026-09-21 实测发现两个口子都没堵上:
+    - **官方路**: 原本写的是 `entry["host_url"] + href`, 但注册表里**从来没有 `host_url` 这个键**,
+      于是恒等于 `"" + href` —— 前缀是死代码, 测试却因为夹子自己传了 `host_url` 而一直绿。
+    - **聚合路**: 压根没做, 而夹子用的是绝对 href, 所以也没暴露。
+    现在两条路都用**自己刚抓的那一页的 URL** 作基准, 不再依赖注册表里一个可能没人写的键。
+    """
+    if not base:
+        return href
+    return urljoin(base, href)
+
+
+def _parse_clues(html: str, today: date, base: str = "") -> list[dict[str, Any]]:
     """从专题页抽出「标题 + 日期 + 链接」。
 
     只认**链接文字里含「消费券」**的条目: 专题页混着大量导航与推荐位,
@@ -183,7 +202,7 @@ def _parse_clues(html: str, today: date) -> list[dict[str, Any]]:
                 "age_days": age,
                 # 同理: 这是**线索**的时效, 只说明"这篇文章多新", 不说明"券还能不能用"。
                 "clue_freshness": _freshness(age),
-                "url": href[:300],
+                "url": _absolute(href, base)[:300],
             }
         )
     # 新的在前; 没日期的排最后(而不是当最新)。
@@ -366,7 +385,8 @@ async def _official_clues(
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for n in range(1, max(1, pages) + 1):
-        page = await _fetch(pattern.replace("{n}", str(n)))
+        page_url = pattern.replace("{n}", str(n))
+        page = await _fetch(page_url)
         if page is None:
             break
         for m in _OFFICIAL_LINK_RE.finditer(page):
@@ -386,7 +406,7 @@ async def _official_clues(
             out.append(
                 {
                     "title": title[:120],
-                    "url": (str(entry.get("host_url") or "") + href if href.startswith("/") else href)[:300],
+                    "url": _absolute(href, page_url)[:300],
                     "published": published,
                     "age_days": age,
                     "clue_freshness": _freshness(age),
@@ -512,7 +532,7 @@ async def voucher_clues(
                     "note": "该站要求人工验证; **不要重试、不要换城市代码硬试** —— 另两路不受影响",
                 }
             else:
-                aggregator_clues = _parse_clues(page, today)
+                aggregator_clues = _parse_clues(page, today, url)
                 for clue in aggregator_clues:
                     clue["via"] = "aggregator"
                 paths["aggregator"] = {"ok": bool(aggregator_clues), "count": len(aggregator_clues), "url": url}
