@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -284,9 +285,17 @@ async def test_a_platform_without_reads_says_how_to_add_one() -> None:
 
 
 async def test_unknown_target_lists_known_ones() -> None:
+    """问一个不存在的 target, 要把**这个平台真实有的**列出来。
+
+    早先这里写死 `== ["coupons"]`。那是把出厂数据抄进判据: 每加一个读定义都得来改一次,
+    却什么都没多判。改成对着 `jd.yaml` 自己算 —— 加读定义不用动判据, 而列错了才会红。
+    """
     payload = await _call(platform="jd", target="nope")
     assert payload["ok"] is False
-    assert payload["known_targets"] == ["coupons"]
+
+    data = yaml.safe_load((WORKSPACE_ROOT / "platforms" / "jd.yaml").read_text(encoding="utf-8"))
+    assert payload["known_targets"] == sorted(data["reads"])
+    assert "nope" not in payload["known_targets"]
 
 
 async def test_unknown_platform_lists_available() -> None:
@@ -344,13 +353,20 @@ async def test_an_incomplete_definition_fails_before_touching_the_page(monkeypat
 
 
 def test_shipped_jd_read_definition_is_complete() -> None:
-    """jd.yaml 的读定义必须自洽 —— 改坏了要让测试红, 而不是等到线上读到空。"""
-    data = yaml.safe_load((WORKSPACE_ROOT / "platforms" / "jd.yaml").read_text(encoding="utf-8"))
-    read = data["reads"]["coupons"]
+    """jd.yaml 的读定义必须自洽 —— 改坏了要让测试红, 而不是等到线上读到空。
 
-    assert read["url"] and read["host"] and read["path_prefix"]
-    assert read["verified_at"], "页面会改版, 读定义必须带核验日期"
-    assert _saving_read._spec(read) is not None
+    每个读定义都过一遍共同那几条; 券包那份另有事实契约的字段名要钉(见下)。
+    """
+    data = yaml.safe_load((WORKSPACE_ROOT / "platforms" / "jd.yaml").read_text(encoding="utf-8"))
+    assert data["reads"], "jd.yaml 至少要有一个读定义"
+
+    for target, read in data["reads"].items():
+        assert read["url"] and read["host"] and read["path_prefix"], target
+        assert read["verified_at"], f"{target} 页面会改版, 读定义必须带核验日期"
+        assert _saving_read._spec(read) is not None, target
+        assert read["markers"], f"{target} 没有 markers 就分不清'真的空'与'页面结构变了'"
+
+    read = data["reads"]["coupons"]
     # 事实契约的字段名: 改这里等于改与本体之间的契约
     assert set(read["fields"]) == {
         "unit",
@@ -364,6 +380,67 @@ def test_shipped_jd_read_definition_is_complete() -> None:
         "expired",
     }
     assert set(read["markers"]) >= {".mod-coupon"}  # 空券包时仍然存在的模块容器
+
+
+#: 京东的类名常带构建哈希后缀(`.noData-531368`)。这种选择器今天能命中, 明天对方重新构建就
+#: 静默失效 —— 而"读到空"正是这个场景最贵的一类错(会被下游当成"没有优惠"用掉)。
+_HASH_SUFFIX = re.compile(r"-[0-9a-f]{6}\b")
+
+
+def _selectors_in(node: Any) -> list[str]:
+    """把读定义里所有选择器捞出来(选择器都是字符串值, 且以 `.` / `#` / `[` 开头)。"""
+    found: list[str] = []
+    if isinstance(node, str):
+        if node[:1] in {".", "#", "["}:
+            found.append(node)
+    elif isinstance(node, dict):
+        for value in node.values():
+            found.extend(_selectors_in(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_selectors_in(value))
+    return found
+
+
+def test_checkout_read_avoids_build_hashed_selectors() -> None:
+    """结算页的读定义不许出现构建哈希 —— 这是 2026-09-18 那次真机核验留下的硬结论。
+
+    当天的页面实测: `.payment-summary*` / `.sku-item` / `[class*="noData"]` 这些是稳的,
+    而 `.received-price-d3c3f7` / `.jd-price-29f024` / `.noData-531368` / `.virtualAsset-8ba94b`
+    这类带 6 位哈希的会随构建变。所以读定义只准用不带哈希的名字, 或者 `[class*="前缀"]`
+    这种前缀匹配。**这条判据是防将来有人图省事把带哈希的选择器抄进来。**
+    """
+    data = yaml.safe_load((WORKSPACE_ROOT / "platforms" / "jd.yaml").read_text(encoding="utf-8"))
+    read = data["reads"]["checkout"]
+
+    selectors = _selectors_in({k: v for k, v in read.items() if k not in {"title", "url"}})
+    assert selectors, "没捞到选择器 —— 判据本身失效了, 不是读定义干净"
+
+    bad = [sel for sel in selectors if _HASH_SUFFIX.search(sel)]
+    assert not bad, f"结算页读定义里混进了带构建哈希的选择器: {bad}"
+
+
+def test_checkout_read_is_block_shaped_and_excludes_pii_regions() -> None:
+    """结算页要读的是价格明细与券区, 且锚点必须**框在价格/券上**(不在收货人模块里)。"""
+    data = yaml.safe_load((WORKSPACE_ROOT / "platforms" / "jd.yaml").read_text(encoding="utf-8"))
+    read = data["reads"]["checkout"]
+
+    blocks = read["blocks"]
+    assert [b["name"] for b in blocks] == ["price_summary", "coupon_area"]
+
+    price, coupon = blocks
+    assert price["anchor"] == [".payment-summary-inner", ".payment-summary"]
+    assert price["label"] == ".payment-summary-item__title"
+    assert price["value"] == ".payment-summary-item__price"
+
+    # 空态是否定断言, 所以必须配 evidence: 没看见空态标时, 要有"券的行真的在"才敢回 false。
+    # 少了它, `empty: false` 会在券模块整个消失的页面上照回 —— 一条安静的错误事实。
+    assert coupon["states"] == {"empty": {"sel": ['[class*="noData"]'], "presence": True, "evidence": [".coupon-item"]}}
+
+    # 收货人/支付信息同屏渲染, 锚点一律不许落到它上面
+    for block in blocks:
+        for sel in _selectors_in(block):
+            assert "consignee" not in sel, sel
 
 
 def test_generated_js_carries_the_declared_spec() -> None:

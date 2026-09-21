@@ -27,6 +27,43 @@ notes: "订单页需登录；未登录会跳 passport.jd.com。"
 # `markers` 是关键而不是装饰 —— 券包为空时这些容器**仍然在**（容器在、券不在 = 券包为空），
 # 而容器本身找不到，说明页面结构变了，必须降级成 unknown，绝不能当成「没有券」。
 # 两种情况在计数上完全一样，区分它们只能靠 markers。
+#
+# 一条读定义可以同时声明**两种抽取形态**（结算页本来就需要）：
+#
+#   形态一 · 重复的列表项 —— `item` + `fields`：一页 N 条同类东西（一张券一行）。
+#
+#   形态二 · 页面级的键值行 + 区块状态 —— `blocks`：页面级的行（商品总额 / 运费 / 共减，不是
+#           列表）+ 区块的状态（券区的三个页签、以及明确的空态「无可用优惠券」）。
+#
+#     blocks:
+#       - name: payment                       # 交给本体的事实名
+#         anchor: [".payment-summary"]        # 该区块本该存在的锚点（缺 -> page_shape_changed）
+#         item: [".payment-summary-item"]     # 行根，在锚点**里面**找
+#         label: ".payment-summary-item__title"
+#         value: ".payment-summary-item__price"
+#       - name: coupon_area
+#         anchor: [".quan-area"]
+#         states:
+#           empty: {sel: ['[class*="noData"]'], presence: true, evidence: [".coupon-item"]}
+#
+# 真实的写法见下面 `reads.checkout` —— 那是 2026-09-18 在真机上核验过的那一份。
+#
+# 形态二的三条纪律（细节见 saving_read 的模块文档）：
+#   1. 锚点是 markers 的等价物，只是粒度到区块：任一声明的锚点 / 行根找不到 -> 整条读定义
+#      降级成 unknown，**不给半截事实**。所以锚点要选成「这一块真在就一定会有的那个东西」。
+#   2. 行只在锚点元素内部抽取 —— 这既是「证明区块在」，也是隐私闸门的第一道。
+#   3. **绝不抽取收货人 / 支付信息**：结算页同屏渲染收货人姓名、手机号、详细地址、银行卡后四位。
+#      不要把收货人 / 发票 / 支付模块写进 blocks，也不要让闸门去兜底。
+#
+# 带构建哈希的类名（形如 `xx-1a2b3c`）会随对方重新构建而变。两种对付办法，优先第一种：
+#   1. 前缀匹配 `[class*="noData"]` —— 前缀一般不含哈希，改版照样命中（结算页就是这么写的）。
+#   2. 候选列表 `[首选, 兜底]` —— 按顺序试，谁先命中用谁；报出来的键用首选（维护者要改的就是它）。
+# 直接把带哈希的名字写死是不行的：它今天命中，明天静默失效，而「读到空」会被下游当成「没有优惠」。
+#
+# `reads.checkout` 是 2026-09-18 在**真实结算页**上逐个选择器数过命中之后才写进来的
+# （要一个登录态、且购物车里有商品的活浏览器）。**没核验过的选择器不要写进出厂数据** ——
+# 那等于埋一颗定时炸弹。它也刻意只框价格与券：这一页同屏有收货人模块（实测 35 处），
+# 锚点落到那儿就是泄露。
 reads:
   coupons:
     title: "已领券清单（券包）"
@@ -52,3 +89,43 @@ reads:
       restrictions: {sel: ".c-range .range-item", many: true, kv: ["label", ".txt"], note: "限品类/限平台/券编号等键值对"}
       use_url: {sel: ".op-btns a[href]", attr: "href", note: "去使用链接"}
       expired: {sel: ".overdue-site", presence: true, note: "是否带「已过期」浮层"}
+
+  # 结算页(订单确认页)。核于 2026-09-18: 逐个选择器在**活的页面**上数过命中。
+  #
+  # **只用不含构建哈希的选择器。** 实测发现这个页面上大量类名带构建哈希
+  # (.received-price-d3c3f7 / .jd-price-29f024 / .noData-531368 / .virtualAsset-8ba94b /
+  # .tabTitleItem-c5c106 ...) —— 它们会随对方重新构建而变, 写进出厂数据等于埋一颗
+  # 定时炸弹(将来会安静地读回空, 而"读回空"正是这个场景最贵的一类错)。
+  # 下面用的要么本身没有哈希, 要么是 `[class*="前缀"]` 匹配(前缀不变即命中)。
+  #
+  # **PII**: 这一页同屏有收货人姓名/手机号/详细地址/银行卡后四位(`[class*="consignee"]`
+  # 实测 35 处)。所以每个区块的锚点都框在**价格与券**上, 且 saving_read 的行只在其锚点
+  # 元素**内部**抽取 —— 收货人模块在锚点之外, 够不到; 返回层还有一道 PII 闸门兜底。
+  checkout:
+    title: "结算页（订单确认）"
+    url: "https://trade.jd.com/shopping/order/getOrderInfo.action"
+    host: "trade.jd.com"
+    path_prefix: "/shopping/order/getOrderInfo.action"
+    verified_at: "2026-09-18"
+
+    # 页面级身份: 这两个容器不在 = 不是结算页 -> page_shape_changed, 不是"没有价格"
+    markers: [".payment-summary", ".production-item"]
+
+    blocks:
+      # 付款详情三行。实测: 商品总额 ￥23.80 / 运费 ￥6.00 / 共减 -￥2.90
+      # 负值走 `__price--red` 修饰类, 但文本本来就带 `-`, 所以只认基类即可。
+      - name: price_summary
+        anchor: [".payment-summary-inner", ".payment-summary"]
+        item: [".payment-summary-item"]
+        label: ".payment-summary-item__title"
+        value: ".payment-summary-item__price"
+
+      # 券区。实测当前是空态「无可用优惠券」。
+      # `evidence` 只在**没看见** `sel` 的时候才起作用（见 saving_read 注入的 JS）：没看见空态标、
+      # 但券的行真的在 -> 才敢回 `false`；两样都没看见 -> 这个键干脆不出现（不知道）。
+      # 少了 evidence，`empty: false` 会在「券模块整个没了」的页面上照回 —— 那正是最贵的一类
+      # 安静错误事实。所以这里**必须**带 evidence，而不是另立一个 has_rows。
+      - name: coupon_area
+        anchor: ['[class*="virtualAsset"]']
+        states:
+          empty: {sel: ['[class*="noData"]'], presence: true, evidence: [".coupon-item"]}
