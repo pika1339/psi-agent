@@ -74,21 +74,79 @@ if [ "$RC" -ne 0 ]; then
   # webhook URL 的读取与 config.py 同顺序: 环境变量优先, 否则宿主配置文件。它是凭据,
   # 不进仓库。
   CONF="${HAITUN_MONITOR_CONF:-/etc/haitun/monitoring.conf}"
-  URL="${HAITUN_MONITOR_WEBHOOK:-}"
-  if [ -z "$URL" ] && [ -f "$CONF" ]; then
-    URL="$(sed -n 's/^[[:space:]]*webhook_url[[:space:]]*=[[:space:]]*//p' "$CONF" | tail -1 | tr -d "\"'")"
-  fi
+  conf_get() {  # 读一项配置, 环境变量优先 —— 与 config.py 的 pick() 同顺序
+    local key="$1" env_name="HAITUN_MONITOR_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
+    local from_env="${!env_name:-}"
+    if [ -n "$from_env" ]; then printf '%s' "$from_env"; return; fi
+    [ -f "$CONF" ] && sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$CONF" | tail -1 | tr -d "\"'"
+  }
+
+  URL="${HAITUN_MONITOR_WEBHOOK:-$(conf_get webhook_url)}"
+  CHAT_ID="$(conf_get feishu_chat_id)"
+  APP_ID="$(conf_get feishu_app_id)"
+  APP_SECRET="$(conf_get feishu_app_secret)"
 
   TAIL="$(tail -c 1500 "$ERR_FILE" 2>/dev/null)"
+
+  # 码 2 的文案要点名**当前这条通路**该查的配置项。配了 chat_id 却去提示查 webhook_url
+  # 是把人指向一个根本没在用的设置 —— 与旧版把投递失败说成采集失败是同一类错误, 只是更细。
+  if [ -n "$CHAT_ID" ]; then
+    WHICH="应用机器人(feishu_chat_id / feishu_app_id / feishu_app_secret)"
+  else
+    WHICH="自定义机器人(webhook_url)"
+  fi
+
+  # 码 2 与其它非零码要分开说。`run.py` 的码 2 **只**来自 `post_text()` 返回 False, 也就是
+  # 「指标采到了、消息也生成完整了, 但发不出去」(webhook 没配, 或投递重试全败)。把它和
+  # 「一项都没采到」混成同一句「本轮指标全部未采集」是在报一个假原因: 收到通知的人会去查
+  # 探针和生产状态, 而该查的是那一行 webhook 配置。
+  #
+  # 实测 2026-09-22: webhook 未配时心跳档稳定退 2 且 stderr 全空 —— 于是群里收到的是一条
+  # 「指标全部未采集」外加一个空的错误尾部, 指向哪儿都不是。
+  if [ "$RC" -eq 2 ]; then
+    CAUSE="■ 消息发不出去(码 2) —— 指标已采集, 投递失败。
+  当前用的是 ${WHICH}; 最可能的成因是它未配置或配错(见 ${CONF}),
+  而不是生产出了问题。这条通知本身能到, 说明失败通知那条独立通路是通的。"
+  else
+    CAUSE="■ 监控脚本非零退出(码 ${RC}) —— 本轮指标全部未采集。
+  这条消息的含义是「不知道生产是什么状态」, 不是「生产正常」。"
+  fi
+
   TEXT="【生成失败】HaiTun ${TIER} · $(date '+%Y-%m-%d %H:%M:%S %Z')
 
-■ 监控脚本非零退出(码 ${RC}) —— 本轮指标全部未采集。
-  这条消息的含义是「不知道生产是什么状态」, 不是「生产正常」。
+${CAUSE}
 
 错误尾部:
 ${TAIL:-(无 stderr 输出)}"
 
-  if [ -n "$URL" ]; then
+  # 这一层必须自己会走两条通路。只会发 webhook 的话, 配了 chat_id 之后失败通知就发不出去
+  # —— 而那恰恰是「日报挂了」时唯一还会出声的东西, 静默在这里代价最大。
+  if [ -n "$CHAT_ID" ] && [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ]; then
+    # 取 token 与发消息都不经本机任何服务, 只有出站 HTTPS —— 与 webhook 一样在被监控对象
+    # 之外。(早先注释说「app token 走 OAuth」是错的, 见 notify.py 里的更正。)
+    TOKEN="$(curl --silent --show-error --max-time 15 \
+      --header 'Content-Type: application/json; charset=utf-8' \
+      --data "$("$PY" -c 'import json,sys; sys.stdout.write(json.dumps({"app_id":sys.argv[1],"app_secret":sys.argv[2]}))' "$APP_ID" "$APP_SECRET")" \
+      "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+      | "$PY" -c 'import json,sys
+try: sys.stdout.write(json.load(sys.stdin).get("tenant_access_token") or "")
+except Exception: pass')"
+    if [ -n "$TOKEN" ]; then
+      # content 是**字符串化的 JSON**, 不是嵌套对象 —— im/v1 与自定义机器人在这点上不同。
+      "$PY" -c 'import json,sys; sys.stdout.write(json.dumps({"receive_id":sys.argv[1],"msg_type":"text","content":json.dumps({"text":sys.stdin.read()},ensure_ascii=False)},ensure_ascii=False))' \
+        "$CHAT_ID" <<< "$TEXT" > "$ERR_FILE.json"
+      curl --silent --show-error --max-time 15 \
+        --header "Authorization: Bearer $TOKEN" \
+        --header 'Content-Type: application/json; charset=utf-8' \
+        --data @"$ERR_FILE.json" \
+        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id" >/dev/null
+      rm -f "$ERR_FILE.json"
+    else
+      # 取不到 token 就明说是这一步 —— 别让人以为消息发出去了。
+      echo "[monitor] 应用机器人取 token 失败(该查凭据), 失败通知只能进 cron 日志:" >&2
+      echo "$TEXT" >&2
+    fi
+  elif [ -n "$URL" ]; then
     # python 来做 JSON 转义: 错误正文里有引号/换行/反斜杠, 手拼 JSON 会让飞书整条拒收
     # —— 而被拒收的表现又是「群里安静」, 正是本脚本要消灭的那件事。
     "$PY" -c 'import json,sys; sys.stdout.write(json.dumps({"msg_type":"text","content":{"text":sys.stdin.read()}},ensure_ascii=False))' \
@@ -98,7 +156,7 @@ ${TAIL:-(无 stderr 输出)}"
       --data @"$ERR_FILE.json" "$URL" >/dev/null
     rm -f "$ERR_FILE.json"
   else
-    echo "[monitor] 无 webhook URL, 失败通知只能进 cron 日志:" >&2
+    echo "[monitor] 两条通路都没配(chat_id 与 webhook_url 皆空), 失败通知只能进 cron 日志:" >&2
     echo "$TEXT" >&2
   fi
 fi

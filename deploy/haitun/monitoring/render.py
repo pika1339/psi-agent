@@ -4,8 +4,8 @@
 
 所以:
 
-1. **异常排最前, 正常压一行。** BAD 与 UNKNOWN 逐条展开在最上面; OK 的那些合成一行
-   「N 项正常」加名字列表, 不逐条占行。
+1. **异常排最前, 正常只给计数。** BAD 与 UNKNOWN 逐条展开在最上面; OK 的那些收成一行
+   「N 项正常」, 不列名字也不逐条占行(为什么连名字都不列, 见 `render()` 里那段注释)。
 2. **每个指标带基线与方向。** 每条展开项都带 `基线` 与方向两栏, 让「加了指标却没给基线」
    在渲染时就显形 —— 而 `Finding` 那层已经把两个字段做成必填。
 3. **「未测到」与「零」两栏, 不混。** UNKNOWN 有自己的一节, 标题就叫「未测到(观测缺口)」,
@@ -39,19 +39,32 @@ from findings import BAD, OK, UNKNOWN, Report
 #: 与一切正常不可区分。所以宁可截断并在末尾说明截断了。
 MAX_CHARS = 8000
 
+#: 单条「原因」在群消息里的字符上限。实测最长一条 120 字, 一条就顶掉三条别的缺口的位置。
+#: 截断而不是不显示: 原因是定位起点, 缺了就只知道「有东西没测到」而不知道从哪查。
+REASON_CLIP = 60
+
+
+def _clip(text: str, limit: int = REASON_CLIP) -> str:
+    """超长就截断并留省略号 —— 留省略号是为了让人知道后面还有, 而不是以为原因就这么短。"""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
 
 def _anomaly_block(idx: int, finding) -> list[str]:
-    """一条异常占三到四行: 名称、实测+基线+方向、读数语义。
+    """一条异常占两行: 名称、实测+基线+方向。
 
     名称单独占行是为了让「哪一项坏了」在扫视时就能抓到 —— 挤进括号堆里的名称等于没写。
     `基线` 与方向仍在同一行内出现(硬要求 2), 只是不再跟名称抢位置。
+
+    **不输出 `semantics`。** 那是「为什么这个数糟」的解释, 每条一行、每行一两句, 实测让
+    一条异常从两行涨到三四行。群消息要回答的是「今天有没有事、是哪一件」, 解释属于查的时候
+    才要看的东西 —— 而且 semantics 对同一项指标每天一字不变, 天天重发就是天天刷同一句话。
+    它仍留在 `Finding` 上, 多维表格与命令行照旧能取到。
     """
-    out = [f"  {idx}. {finding.name}"]
-    out.append(f"       实测 {finding.value}    基线 {finding.baseline}    {finding.direction}")
-    if finding.semantics:
-        # 语义只对异常与未测到展开。OK 那些压成一行, 语义无处可放也没人要读。
-        out.append(f"       ↳ {finding.semantics}")
-    return out
+    return [
+        f"  {idx}. {finding.name}",
+        f"       实测 {finding.value}    基线 {finding.baseline}    {finding.direction}",
+    ]
 
 
 def _unknown_groups(unknowns) -> list[str]:
@@ -70,19 +83,22 @@ def _unknown_groups(unknowns) -> list[str]:
     out: list[str] = []
     for i, (reason, items) in enumerate(groups.items(), 1):
         out.append(f"  {i}. " + ", ".join(f.name for f in items))
-        out.append(f"       原因: {reason}")
+        # 原因**截断**而不是整段抄: 实测有一条原因 120 字(连「本卡不回改 src/ 埋点」这种
+        # 对收信人无用的交代都在里面), 一条就顶掉三条别的缺口。够定位就行, 全文在 cron 日志。
+        out.append(f"       原因: {_clip(reason)}")
+        # 不再逐项列 `direction`。它是「未测到为什么要紧」的说明(如「未测到 ≠ 零花费」),
+        # 每项一句且每天一字不变 —— 而那个道理由本节标题「观测缺口, 不等于零」讲一次就够。
+        # 基线仍逐项给: 归组省掉的是重复的话, 不是每项的刻度(硬要求 2)。
         if len(items) > 1:
-            # 只有一项时跳过这段 —— 名字已经在组标题上, 再列一遍就是同一个词连着出现两次。
-            # 基线逐项给: 归组省掉的是重复的原因, 不是每项的刻度(硬要求 2)。
             for f in items:
-                out.append(f"       · {f.name} 基线 {f.baseline}    {f.direction}")
+                out.append(f"       · {f.name} 基线 {f.baseline}")
         else:
-            out.append(f"       基线 {items[0].baseline}    {items[0].direction}")
+            out.append(f"       基线 {items[0].baseline}")
     return out
 
 
 def render(report: Report) -> str:
-    """渲染一份报告。异常在最前, 正常压一行, 未测到独立一节。"""
+    """渲染一份报告。异常在最前, 正常只给计数, 未测到独立一节。"""
     anomalies = report.of(BAD)
     unknowns = report.of(UNKNOWN)
     healthy = report.of(OK)
@@ -108,7 +124,12 @@ def render(report: Report) -> str:
 
     if healthy:
         lines.append("")
-        lines.append(f"□ 正常 {len(healthy)} 项: " + ", ".join(f.name for f in healthy))
+        # 只给计数, **不列名字**。那串名字实测 262 字符且每天一字不变 —— 天天重发一份不变的
+        # 清单, 读的人第二天起就会跳过整节, 而跳过的习惯会连带盖住上面的异常。
+        #
+        # 计数本身要留: 它是「有多少项在被看着」, 少了这个数就分不清「一切正常」与
+        # 「采集只跑了三项而那三项正常」—— 后者正是 render 末尾那句要防的事。
+        lines.append(f"□ 正常 {len(healthy)} 项")
 
     if report.cost_body:
         # 排在异常与未测到**之后**: 归因明细的行数随会话数涨, 放前面会把异常挤出视野, 而

@@ -102,6 +102,15 @@ class Config:
     #: 风险(OAuth 那条路坏过)由「写表失败不影响发消息」缓解, 见 bitable.push。
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
+    #: 群 chat_id。配了它就用**应用机器人**发消息(`im/v1/messages`), 优先于 webhook。
+    #:
+    #: 两条通路都满足「在被监控对象之外」这个硬要求 —— 应用机器人取 tenant_access_token
+    #: 是一次出站 POST 带 app_id/app_secret, **不碰本机的 OAuth 回调**, 也不经 gateway
+    #: 或 oauth-proxy。(notify.py 早先的 docstring 说反了, 见那里的更正。)
+    #:
+    #: 选它而不选自定义机器人的实际理由: 应用凭据本来就为多维表格配好了, 不必再让人去建
+    #: 一个自定义机器人、再多管一份凭据。少一份要维护的凭据就少一个会过期没人发现的东西。
+    feishu_chat_id: str = ""
     bitable_app_token: str = ""
     bitable_table_id: str = ""
     #: 表的可点链接, 只用于在异常消息末尾附一行「明细见表」。空则不附。
@@ -156,6 +165,7 @@ class Config:
             timeout_seconds=int(timeout_raw) if timeout_raw.isdigit() else 10,
             feishu_app_id=pick("feishu_app_id"),
             feishu_app_secret=pick("feishu_app_secret"),
+            feishu_chat_id=pick("feishu_chat_id"),
             bitable_app_token=pick("bitable_app_token"),
             bitable_table_id=pick("bitable_table_id"),
             bitable_url=pick("bitable_url"),

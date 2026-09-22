@@ -254,15 +254,46 @@ def build_row(report: Report, *, day: str) -> dict[str, object]:
 
 
 def ensure_schema(app_token: str, table_id: str, token: str, *, opener=None) -> list[str]:
-    """把缺的列补齐, 返回新建的列名。已存在的列**不改类型、不改名**。
+    """把缺的列补齐, 返回本次改动的列名。已存在的列**不改类型、不改名** —— 主字段除外。
 
     幂等: 每次运行都调一遍, 这样「加了一个新指标」不需要有人去飞书里手点。不动已有列是
     因为改名会让代码按新名写入时报 FieldNameNotFound, 而老名那列从此不再更新 —— 表面上
     看是「那个指标停止采集了」。
+
+    ## 主字段是那条契约唯一的例外, 因为它没法用「补一列」的方式补
+
+    飞书新建 table 时**自带一个主字段**(`is_primary`), 默认名叫「多行文本」, 而判重要按
+    `PRIMARY` 过滤。这个字段不能删, 也不能再建一个同名的(重名建列直接被拒), 所以「只补缺
+    的列」在一张新表上永远补不出 `PRIMARY` 来 —— 于是首次 `write_row` 的那次 search 打在
+    一个不存在的字段上, 回 `code=1254018 InvalidFilter`(2026-09-22 在新建 base 上实测)。
+
+    所以这里对 `is_primary` 那个字段**改名**成 `PRIMARY`。例外只开给它一个:
+
+    * 普通列改名的坏处(老名那列停更, 看起来像指标停止采集)在主字段上不存在 —— 主字段只做
+      判重, 不承载任何指标的历史;
+    * 范围限定在 `is_primary` 上, 而不是「名字不认识就改」: 后者会改掉人手加的列, 或者在
+      两个指标列之间互相改名。
     """
     base = f"/bitable/v1/apps/{app_token}/tables/{table_id}"
-    existing = {f["field_name"] for f in _call(f"{base}/fields?page_size=200", token, opener=opener).get("items", [])}
+    items = _call(f"{base}/fields?page_size=200", token, opener=opener).get("items", [])
+    existing = {f["field_name"] for f in items}
     created: list[str] = []
+
+    if PRIMARY not in existing:
+        primary = next((f for f in items if f.get("is_primary")), None)
+        if primary is not None:
+            # 类型一起写成文本(1): 主字段必须是文本而不是日期, 见 `PRIMARY` 的注释 ——
+            # 日期类型存毫秒时间戳, search 的时区归一化会让「今天」在边界上对不上。
+            _call(
+                f"{base}/fields/{primary['field_id']}",
+                token,
+                {"field_name": PRIMARY, "type": 1},
+                method="PUT",
+                opener=opener,
+            )
+            existing.discard(primary["field_name"])
+            existing.add(PRIMARY)
+            created.append(f"{primary['field_name']} -> {PRIMARY}(主字段改名)")
 
     def add(name: str, field_type: int, prop: dict | None = None) -> None:
         if name in existing:
@@ -332,7 +363,7 @@ def push(report: Report, cfg, *, day: str, opener=None) -> bool:
         token = tenant_token(cfg.feishu_app_id, cfg.feishu_app_secret, opener=opener)
         created = ensure_schema(cfg.bitable_app_token, cfg.bitable_table_id, token, opener=opener)
         if created:
-            print(f"[monitor] 趋势表新建了 {len(created)} 列: {', '.join(created)}", file=sys.stderr)
+            print(f"[monitor] 趋势表改动了 {len(created)} 列: {', '.join(created)}", file=sys.stderr)
         action, rid = write_row(
             cfg.bitable_app_token, cfg.bitable_table_id, token, build_row(report, day=day), opener=opener
         )

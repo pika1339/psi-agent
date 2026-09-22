@@ -297,15 +297,48 @@ def test_exposed_equals_total_is_bad_even_at_the_expected_count(tmp_path: Path) 
 
 
 def test_exposed_baseline_names_the_expected_number(tmp_path: Path) -> None:
-    """基线里必须出现「应是 66」那个数。
+    """基线里必须出现一个**具体的数**。
 
-    `232 of 232` 单看无异常, 只有知道应是 66 才叫异常 —— **没有基线的裸数字不会触发任何人的
+    `232 of 232` 单看无异常, 只有知道「应是几」才叫异常 —— **没有基线的裸数字不会触发任何人的
     警觉**。所以基线字段里必须真的带着那个数, 不能是「应更少」这种无刻度的话。
+
+    读不到清单文件时(本例 tmp_path 下没有 tools/EXPOSED.txt)退到写死的兜底值, 那也是个数。
     """
     root = tmp_path / "gateway"
     _write(root, [_turn(tools_exposed=232, tools_total=232)])
     item = _by_name(probes_cost.collect(_reads(root)), "工具暴露比值 N/M")
-    assert str(probes_cost.EXPECTED_EXPOSED) in item.baseline
+    assert str(probes_cost.EXPECTED_EXPOSED_FALLBACK) in item.baseline
+
+
+def test_exposed_baseline_counts_the_manifest_not_a_hardcoded_number(tmp_path: Path) -> None:
+    """基线**数清单文件**, 清单扩条目时基线跟着涨。
+
+    2026-09-22 实测的失败: 常数写死成 66(9-14 清单 65 条时立的), 清单随后扩到 90 条, 于是
+    日报把「实测 90」报成「比预期宽 24 个, 需处理」—— 真相是清单本身就有 90 条、收窄完全按
+    清单生效了。硬编码基线落后时不报警, 它会用一句自信的错话把责任指反。
+
+    清单写 **95** 条而不是 90: 用真实的当前条数会让这条判据在「函数其实还在读常数」时也能
+    过 —— 只要有一天常数被顺手改成 90。挑一个既不等于兜底值、也不等于任何真实历史条数的数,
+    断言才只能由「真的数了这个文件」来满足。
+    """
+    # 目录层级照生产摆: appdata 根是 `<workspace>/.psi/appdata`, 清单在 `<workspace>/tools/`。
+    # 别把 root 直接放 tmp_path 下再按上两级找 —— 那样清单会落在 tmp_path 外面, 判据测的
+    # 就不是生产那个相对关系了。
+    workspace = tmp_path / "workspace"
+    root = workspace / ".psi" / "appdata"
+    _write(root, [_turn(tools_exposed=95, tools_total=232)])
+    manifest = workspace / "tools" / "EXPOSED.txt"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        # 夹注释行与空行: 它们不得计入条数, 否则基线会被注释篇幅抬高一截。
+        "# 这行是注释, 不算条目\n\n" + "".join(f"tool_{i}\n" for i in range(95)),
+        encoding="utf-8",
+    )
+    item = _by_name(probes_cost.collect(_reads(root)), "工具暴露比值 N/M")
+    assert "95" in item.baseline, f"基线没跟清单: {item.baseline}"
+    assert str(probes_cost.EXPECTED_EXPOSED_FALLBACK) not in item.baseline, f"清单读到了却还在报兜底值: {item.baseline}"
+    # 实测 95 == 清单 95, 不该报异常 —— 这正是 9-22 那次误报的形态。
+    assert item.status == OK, f"实测数等于清单条数却报了 {item.status}: {item.value}"
 
 
 def test_exposed_unknown_when_only_one_of_the_pair_present(tmp_path: Path) -> None:
@@ -731,9 +764,14 @@ def test_compaction_read_from_compaction_rows(tmp_path: Path) -> None:
     """压缩耗时与次数从 `event="compaction"` 行读。
 
     实测 41.5s x 22 次是批一上线后的头号成本。这里按那个量级造数据。
+
+    耗时那半造的是 60s 而不是 41.5s: 2026-09-22 把 p50 告警线从 20s 抬到 45s(理由见
+    `probes_cost.COMPACTION_P50_WARN_S` —— 常态就是 23s, 定在 20s 等于天天亮红灯), 于是
+    41.5s 现在**正确地**判为 OK。造一个真的越线值, 这条判据测的才仍是「越线要判 BAD」
+    而不是「这个具体数字要判 BAD」。次数那半仍用 22 —— 它的线(10 次)没动。
     """
     root = tmp_path / "gateway"
-    rows = [_turn()] + [_turn(event="compaction", duration_s=41.5) for _ in range(22)]
+    rows = [_turn()] + [_turn(event="compaction", duration_s=60.0) for _ in range(22)]
     _write(root, rows)
     items = probes_cost.collect(_reads(root))
 
@@ -743,7 +781,7 @@ def test_compaction_read_from_compaction_rows(tmp_path: Path) -> None:
 
     dur = _by_name(items, "压缩耗时 p50/p95")
     assert dur.status == BAD
-    assert "41.5s" in dur.value
+    assert "60.0s" in dur.value
 
 
 def test_zero_compactions_is_measured_not_a_gap(tmp_path: Path) -> None:
@@ -923,3 +961,212 @@ def test_schema_chars_reported_as_missing_upstream_field(tmp_path: Path) -> None
     assert "埋点无此字段" in item.reason
     assert "289774" in item.baseline, "基线要带上曾实测的那个数, 否则这条缺口没有刻度"
     assert probes_cost.MISSING_UPSTREAM_INPUTS, "缺口必须在模块里留下文字记录"
+
+
+# ==========================================================================
+# brief: 群消息不带归因明细, 但诚实性文字一条都不许少
+# ==========================================================================
+
+
+def _brief_pair(tmp_path: Path, pricing: Any) -> tuple[str, str]:
+    """同一份 totals 渲两遍 —— 完整版与群里那版。
+
+    造多容器多会话多模型的数据, 否则四张归因表本来就是空的, 「brief 去掉了明细」会因为完整版
+    也没有明细而假绿。
+    """
+    roots = []
+    for name, sid, model in (
+        ("gateway", "g1", "deepseek-chat"),
+        ("luolin", "l1", "deepseek-reasoner"),
+        ("chengxx", "c1", "deepseek-chat"),
+    ):
+        root = tmp_path / name
+        _write(root, [_turn(session_id=sid, model=model) for _ in range(3)])
+        roots.append(root)
+    totals = cost.summarize(_reads(*roots), pricing)
+    assert len(totals.by_container) >= 3, "前提: 完整版确实有归因明细可以被去掉"
+    return cost.render_cost_section(totals), cost.render_cost_section(totals, brief=True)
+
+
+def test_brief_drops_the_four_attribution_tables(tmp_path: Path, pricing: Any) -> None:
+    """**群里那份不带按容器/用途/模型/会话的四张表。**
+
+    实测 62 行的日报里成本一节占 33 行, 其中 20 行是这四张表, 而同样的明细每天以一行 16 列
+    写进多维表格。群消息里再抄一遍是第二个副本, 且它一长就把上面的异常挤出视野 —— 收信人
+    养成跳过整节的习惯后, 连异常一起跳过。
+    """
+    full, brief = _brief_pair(tmp_path, pricing)
+
+    for table in ("按容器", "按用途", "按模型", "按会话"):
+        assert table in full, f"前提: 完整版有「{table}」这张表"
+        assert f"{table}(" not in brief and f"  {table}:" not in brief, f"群消息不该带「{table}」表"
+
+    assert len(brief.splitlines()) < len(full.splitlines()), "brief 必须真的更短"
+    assert "多维表格" in brief, "去掉明细要留一行指路, 否则读者以为归因没人算"
+
+
+def test_brief_keeps_every_honesty_statement(tmp_path: Path, pricing: Any) -> None:
+    """收短只许动明细, **诚实性文字一条都不许少**。
+
+    版本号、「未与账单对过」、下限警告、未测到的来源、解析失败行数 —— 这五样回答的是「这个数
+    能不能信」, 与明细是两回事。少任何一条, 一个算低了的金额就会以「实测成本」的名义每天发进
+    群里。这条判据是收短这件事唯一的刹车。
+    """
+    gateway = tmp_path / "gateway"
+    rows = [_turn(), _turn(reported=False)]
+    _write(gateway, rows)
+    bad = tmp_path / "gateway-bad"
+    (bad / "metrics").mkdir(parents=True)
+    (bad / "metrics" / f"{DAY}.jsonl").write_text("{坏行\n", encoding="utf-8")
+    reads = [
+        cost.read_source("gateway", gateway),
+        cost.read_source("luolin", bad),
+        cost.read_source("chengxx", tmp_path / "nonexistent-chengxx"),
+    ]
+    totals = cost.summarize(reads, pricing)
+    assert totals.is_lower_bound and totals.malformed_rows and totals.unknown_sources(), "前提: 三样缺口都在"
+
+    brief = cost.render_cost_section(totals, brief=True)
+
+    assert "v2-2026-09-15" in brief, "版本号: 少了就分不清调价与用量变化"
+    assert cost.NOT_RECONCILED in brief, "「未与账单对过」"
+    assert "下限" in brief, "总额是下限这件事"
+    assert "chengxx" in brief, "未测到的来源要点名"
+    assert "解析失败" in brief, "解析失败行数"
+    assert "不等于零花费" in brief, "「未测到 ≠ 零花费」那句是这节存在的理由"
+
+
+def test_brief_names_unknown_sources_without_repeating_their_reasons(tmp_path: Path, pricing: Any) -> None:
+    """未测到的来源在群消息里**只点名, 不抄原因**。
+
+    实测: 同一句「metrics/ 目录不存在: /srv/haitun/psi-agent/workspace-luolin/.psi/appdata/
+    metrics」在一份日报里出现两次 —— 一次在「未测到」一节(那节归了组、截到 60 字), 一次在成本
+    一节(整段原文)。两个来源就是 2 行 300 字符的纯重复。
+
+    判据用 `count` 而不是 `in`: 断言原因「不在」会把「完整版也不许有原因」一起钉死, 而完整版
+    该有; 断言原因「在」则对重复前后都成立。要量的是**出现几次**。
+    """
+    gateway = tmp_path / "gateway"
+    _write(gateway, [_turn()])
+    reads = [
+        cost.read_source("gateway", gateway),
+        cost.read_source("luolin", tmp_path / "nonexistent-luolin"),
+    ]
+    totals = cost.summarize(reads, pricing)
+    reason = totals.unknown_sources()[0].reason
+    assert len(reason) > 30, "前提: 原因确实是一段长文本"
+
+    brief = cost.render_cost_section(totals, brief=True)
+    full = cost.render_cost_section(totals)
+
+    assert "luolin" in brief, "来源仍要点名 —— 不知道是谁瞎了就没法查"
+    assert reason not in brief, "原因不该在群消息的成本节里再抄一遍"
+    assert "见上面" in brief, "要指一句路, 否则读者不知道原因去哪看"
+    assert reason in full, "完整版仍要带原因: 命令行和月报没有上面那一节可指"
+
+
+def test_daily_group_message_uses_brief_and_monthly_does_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """日报走 brief, 而**完整版必须仍有人要** —— 否则参数是死代码。
+
+    判据直接调 `run.build_daily()`(生产发群里走的那条路), 断言它的成本正文不含四张表; 再
+    断言 `render_cost_section` 不带 brief 时表还在。只测前半会让「把明细整个删掉」也通过,
+    那样月报和排查时就再也拿不到归因。
+    """
+    root = tmp_path / "gateway"
+    _write(root, [_turn(session_id=f"s{i}") for i in range(4)], day=_today())
+    monkeypatch.setenv("PSI_COST_APPDATA_ROOTS", f"gateway={root}")
+
+    report = run_mod.build_daily(run_mod.Config(), runner=_boom)
+    assert report.cost_body, "前提: 日报确实带成本正文"
+    assert "按会话" not in report.cost_body, "日报发群里的那份不该带归因表"
+    assert "多维表格" in report.cost_body
+
+    totals = cost.summarize(_reads(root), cost.load_pricing(directory=_PRICING, version="v2-2026-09-15"))
+    assert "按会话" in cost.render_cost_section(totals), "完整版仍要有明细, 否则 brief 参数没有对照"
+
+
+# ==========================================================================
+# 抬上去的三条告警线 (2026-09-22 负责人定: 「现在这些都不算异常」)
+# ==========================================================================
+#
+# 这一节钉的是**具体数字**, 这在判据里通常是坏味道 —— 但这三条线是负责人按实测常态拍的
+# 业务决定, 不是实现细节。没有这一节的后果实测过: 把三个常量全改回旧值, `tests/deploy`
+# 201 条全绿, 一条都没红。也就是说「日报天天亮三盏红灯」这个已经修掉的毛病, 可以被一次
+# 无心的回滚悄悄带回来。
+#
+# 每条都配一个**越线值**作对照: 只钉「常态值判 OK」的话, 一个「这条指标永远 OK」的实现
+# (比如把 make 写死成 ok)也全绿 —— 那等于把告警线删了。
+
+
+def test_request_bytes_baseline_admits_todays_normal_but_still_catches_a_spike(tmp_path: Path) -> None:
+    """请求体字节数: **1226 KiB 算正常, 2000 KiB 仍报异常。**
+
+    1226 KiB 是 2026-09-22 生产实测的 p95。旧线 600 KiB 之下它天天报 BAD, 而它就是这套
+    系统的常态体积(首字延迟≈字节数÷带宽, 体积大是已知结构问题, 不是当天的新事故)。
+    """
+    normal = tmp_path / "normal"
+    _write(normal, [_turn(req_bytes=1226 * 1024) for _ in range(20)])
+    item = _by_name(probes_cost.collect(_reads(normal)), "请求体字节数 p50/p95")
+    assert item.status == OK, f"1226 KiB 应算正常, 实际 {item.status}: {item.value}"
+
+    spike = tmp_path / "spike"
+    _write(spike, [_turn(req_bytes=2000 * 1024) for _ in range(20)])
+    item = _by_name(probes_cost.collect(_reads(spike)), "请求体字节数 p50/p95")
+    assert item.status == BAD, "抬线不等于拆线 —— 2000 KiB 必须仍然报出来"
+    assert "1500" in item.baseline, f"基线文字要和常量一起走, 实际: {item.baseline}"
+
+
+def test_compaction_duration_baseline_admits_41s_but_still_catches_60s(tmp_path: Path) -> None:
+    """压缩耗时: **41.5s 算正常, 60s 仍报异常。**
+
+    41.5s 是批一上线后实测的 p50。旧线 20s 之下它恒红。
+    """
+    normal = tmp_path / "normal"
+    _write(normal, [_turn()] + [_turn(event="compaction", duration_s=41.5) for _ in range(5)])
+    item = _by_name(probes_cost.collect(_reads(normal)), "压缩耗时 p50/p95")
+    assert item.status == OK, f"41.5s 应算正常, 实际 {item.status}: {item.value}"
+    assert "45" in item.baseline, f"基线文字要和常量一起走, 实际: {item.baseline}"
+
+    slow = tmp_path / "slow"
+    _write(slow, [_turn()] + [_turn(event="compaction", duration_s=60.0) for _ in range(5)])
+    item = _by_name(probes_cost.collect(_reads(slow)), "压缩耗时 p50/p95")
+    assert item.status == BAD, "60s 必须仍然报出来"
+
+
+def test_compaction_share_baseline_admits_74pct_but_still_catches_95pct(tmp_path: Path, pricing: Any) -> None:
+    """压缩占总花费比例: **74% 算正常, 95% 仍报异常。**
+
+    74.0% 是 2026-09-22 实测值, 区间 70-85%。「压缩是头号成本项」是这套系统的已知常量,
+    旧线 30% 把一个常量当成每日新闻播报。
+
+    造数据的办法是配比例而不是写死钱数: 花费由价格表算, 钉钱数会让判据跟着价格表版本坏掉。
+    """
+    # 1 个普通回合 + 3 个压缩回合, 压缩的 prompt 量级远大于普通回合 → 占比落在 70-80%。
+    normal = tmp_path / "normal"
+    compactions = [_turn(event="compaction", prompt=57_000, completion=500) for _ in range(3)]
+    _write(normal, [_turn(prompt=60_000, completion=500), *compactions])
+    reads = _reads(normal)
+    share = _by_name(probes_spend.collect(cost.summarize(reads, pricing), reads), "压缩占总花费比例")
+    pct = float(share.value.rstrip("%"))
+    assert 70.0 <= pct <= 85.0, f"造的数据没落在实测区间里, 这条判据就没在测该测的事: {share.value}"
+    assert share.status == OK, f"{share.value} 应算正常, 实际 {share.status}"
+    assert "85" in share.baseline, f"基线文字要和常量一起走, 实际: {share.baseline}"
+
+    hog = tmp_path / "hog"
+    compactions = [_turn(event="compaction", prompt=100_000, completion=500) for _ in range(5)]
+    _write(hog, [_turn(prompt=1_000, completion=100), *compactions])
+    reads = _reads(hog)
+    share = _by_name(probes_spend.collect(cost.summarize(reads, pricing), reads), "压缩占总花费比例")
+    assert float(share.value.rstrip("%")) > 85.0, f"造的数据没越线: {share.value}"
+    assert share.status == BAD, "抬线不等于拆线 —— 压缩吃掉 95% 必须报出来"
+
+
+def test_the_two_untouched_lines_stayed_untouched() -> None:
+    """**没动的两条线要保持没动。**
+
+    首字延迟 6s 与压缩次数 10 次/天这两条一次都没触发过, 所以 2026-09-22 那轮抬基线没碰
+    它们。写这条判据是因为上面三条抬线的改动就在同一个文件里相邻几行 —— 顺手多改一个不会
+    让任何别的判据变红, 而那等于悄悄放宽了一条从来没出过问题的告警。
+    """
+    assert probes_cost.TTFT_P95_WARN_S == 6.0
+    assert probes_cost.COMPACTION_COUNT_WARN == 10

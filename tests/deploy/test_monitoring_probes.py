@@ -477,8 +477,15 @@ def test_disk_and_inode_are_separate_findings():
 # ───────────────── 渲染的三条硬要求 ─────────────────
 
 
-def test_anomalies_come_first_and_healthy_is_one_line():
-    """异常排最前, 正常压一行。日报最大的失败模式不是数字错, 是没人读。"""
+def test_anomalies_come_first_and_healthy_is_only_a_count():
+    """异常排最前, 正常**只给计数不列名字**。日报最大的失败模式不是数字错, 是没人读。
+
+    改自原先的「正常压一行」: 一行没错, 但实测那一行是 262 字符、18 个名字, 且每天一字不变。
+    天天重发一份不变的清单, 读的人第二天起就跳过整节 —— 而跳过的习惯会连带盖住上面的异常。
+
+    计数必须留: 它是「有多少项在被看着」。少了这个数就分不清「一切正常」与「采集只跑了三项
+    而那三项正常」, 后者是本文件另一条判据专门要防的事。
+    """
     report = findings.Report(tier="日报", timestamp="2026-09-20 08:57:00 CST(UTC+08:00)")
     for i in range(5):
         report.add(findings.ok(f"正常项{i}", value="200", baseline="200", direction="应为 200"))
@@ -486,11 +493,15 @@ def test_anomalies_come_first_and_healthy_is_one_line():
     text = render.render(report)
 
     assert text.startswith("【异常】")
-    assert text.index("坏掉的 vhost") < text.index("正常项0")
-    # 正常项压成一行 —— 5 个名字在同一行里。
     healthy_line = [line for line in text.splitlines() if line.startswith("□ 正常")]
     assert len(healthy_line) == 1
-    assert all(f"正常项{i}" in healthy_line[0] for i in range(5))
+    assert healthy_line[0] == "□ 正常 5 项", f"只该给计数, 实为 {healthy_line[0]!r}"
+    # 名字一个都不该出现在正常那节 —— 断言「全都没有」而不是「某一个没有」: 后者在只漏列
+    # 一个名字时照样绿。
+    assert not any(f"正常项{i}" in text for i in range(5)), "正常项的名字不该进群消息"
+    # 异常仍要在最前面, 且它的名字必须还在 —— 收短不能把「是哪一件」也收掉。
+    assert "坏掉的 vhost" in text
+    assert text.index("坏掉的 vhost") < text.index("□ 正常")
 
 
 def test_unknown_is_its_own_section_not_merged_into_ok_or_bad():
@@ -577,7 +588,17 @@ def test_anomaly_name_is_on_its_own_line_not_buried_in_parens():
     detail = next(line for line in lines if "232 of 232" in line)
     assert "基线 66 of 232" in detail, "实测与基线要在同一行才比得起来"
     assert "N==M 表示收窄未生效" in detail
-    assert any("EXPOSED.txt" in line for line in lines), "异常的读数语义仍要展开"
+
+    # 语义(semantics)不进群消息: 它是「这个指标怎么读」的解释, 每天一字不变, 而方向(direction)
+    # 已经说了「往哪边算异常」。留在 Finding 上供月报和排查时取, 不每天广播。
+    assert not any("EXPOSED.txt" in line for line in lines), "读数语义不该进群消息"
+    assert report.findings[0].semantics == "EXPOSED.txt 缺失时收窄整体不生效", (
+        "语义只是不渲染, 不是不记录 —— 丢了它排查时就没有解释可看"
+    )
+    # 一条异常占的行数钉死在 2 —— 名称一行 + 实测那行。钉总行数会把表头和分节空行也算进来,
+    # 那些是固定开销, 改了标题就得改判据, 而真正会重新膨胀的是每条目的行数。
+    entry_lines = [line for line in lines if line.startswith("  ") or line.startswith("    ")]
+    assert len(entry_lines) == 2, f"一条异常只该占两行, 实为 {len(entry_lines)} 行: {entry_lines}"
 
 
 def test_unknowns_sharing_a_reason_print_that_reason_once():
@@ -600,8 +621,33 @@ def test_unknowns_sharing_a_reason_print_that_reason_once():
     assert "未测到 4 项" in text, "归组后计数仍按指标数, 不按组数 —— 报 2 项会低估缺口"
     for name in ("首字延迟 p95", "请求体字节 p95", "每回合成本 p95", "OOM 次数"):
         assert name in text
-    # 归组省掉的是重复原因, 不是每项的刻度。
+    # 归组省掉的是重复原因, 不是每项的刻度(硬要求 2)。
     assert text.count("基线 < 1") == 3
+
+
+def test_long_unknown_reason_is_clipped_but_still_locatable():
+    """**超长原因要截断**, 且截断后仍看得出是哪个缺口。
+
+    实测一条原因 120 字, 里面连「本卡不回改 src/ 埋点」这种对收信人无用的交代都在 —— 一条
+    就顶掉三条别的缺口的位置。截断而不是整条不显示: 原因是定位的起点, 没有它就只知道「有东西
+    没测到」而不知道从哪查。
+
+    判据钉在**渲染出来那行的长度**上, 不钉 `_clip` 的返回值: 直接测 `_clip` 只能证明这个函数
+    会截断, 证不了渲染真的用了它 —— 把调用点换回原文的变异能从那种判据下面整个溜过去。
+    """
+    long_reason = "埋点无此字段: 上游 " + "很长的交代" * 20
+    assert len(long_reason) > 100, "前提: 造的原因确实超长"
+    report = findings.Report(tier="日报", timestamp="T")
+    report.add(findings.unknown("工具 schema 字符数", reason=long_reason, baseline="289774", direction="越高越糟"))
+    text = render.render(report)
+
+    reason_line = next(line for line in text.splitlines() if "原因:" in line)
+    assert long_reason not in text, "原文整段抄进来了 —— 截断没生效"
+    assert len(reason_line) < len(long_reason), "截断后那行必须比原文短"
+    assert "…" in reason_line, "要留省略号, 否则读者以为原因就这么短"
+    assert long_reason[:30] in reason_line, "开头要留着 —— 截没了就无从定位"
+    # 基线不受截断影响: 它是另一栏, 且是硬要求 2。
+    assert "289774" in text
 
 
 # ───────────────── 进趋势表的数字 ─────────────────

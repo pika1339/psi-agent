@@ -103,12 +103,16 @@ def probe_vhost(host: str, expect: int, public_ip: str, *, timeout: int = 10, ru
     别的机器上(境内 A / 境外 B 两台都跑过同一套栈), 那种情况下「绿」证明不了这台机器活着。
     这正是「兜底链提前终止」那类坑 —— 少一个输入就悄悄换一条语义不同的路径。
     """
+    # 这个探针的四个出口全部 `urgent=True` —— 它测的是「公网还能不能访问」, 坏了用户此刻
+    # 就在撞墙。两条 UNKNOWN 出口也算: 探针瞎了的时候, 服务是死是活没人知道, 而「不知道」
+    # 不该比「知道它坏了」安静(502 那 29 小时就是在安静里过去的)。
     if not public_ip:
         return unknown(
             f"vhost {host} HTTPS",
             reason="未配置 public_ip, 无法用 --resolve 定向到目标机; 走系统 DNS 可能打到另一台机器",
             baseline=str(expect),
             direction=f"应为 {expect}",
+            urgent=True,
         )
     result = _run_curl(
         _curl_args(f"https://{host}/", resolve=f"{host}:443:{public_ip}", timeout=timeout),
@@ -120,6 +124,7 @@ def probe_vhost(host: str, expect: int, public_ip: str, *, timeout: int = 10, ru
             reason=f"curl 没能给出状态码: {result.stderr or '无 stderr'}",
             baseline=str(expect),
             direction=f"应为 {expect}",
+            urgent=True,
         )
     if result.code == "000":
         return bad(
@@ -128,6 +133,7 @@ def probe_vhost(host: str, expect: int, public_ip: str, *, timeout: int = 10, ru
             baseline=str(expect),
             direction=f"应为 {expect}",
             semantics="000 不是 HTTP 状态码。已用 --resolve 故排除了 SNI 打裸 IP 那种假报",
+            urgent=True,
         )
     if result.code != str(expect):
         return bad(
@@ -136,6 +142,7 @@ def probe_vhost(host: str, expect: int, public_ip: str, *, timeout: int = 10, ru
             baseline=str(expect),
             direction=f"应为 {expect}",
             semantics="从公网打的, 容器内自检全绿不构成反证 —— 502 那 29 小时就是这样过去的",
+            urgent=True,
         )
     return ok(f"vhost {host} HTTPS", value=result.code, baseline=str(expect), direction=f"应为 {expect}")
 
@@ -153,12 +160,15 @@ def probe_oauth_callback(
     —— 那都说明这一跳活着。`404` 是白名单这一层没放行(oauth-proxy 白名单外一律 404),
     `000` 是压根没连上。
     """
+    # 同 vhost: 四个出口全 `urgent=True`。这条不通则登录整个不可用, 而它是唯一一条入站路径,
+    # 出站那些探针全绿也证明不了它活着。
     if not public_ip:
         return unknown(
             f"OAuth 回调 {path}",
             reason="未配置 public_ip, 无法用 --resolve 定向到目标机",
             baseline="非 000 / 非 404",
             direction="000=入站断; 404=白名单未放行",
+            urgent=True,
         )
     result = _run_curl(
         _curl_args(f"https://{host}{path}", resolve=f"{host}:443:{public_ip}", timeout=timeout),
@@ -172,9 +182,17 @@ def probe_oauth_callback(
             reason=f"curl 没能给出状态码: {result.stderr or '无 stderr'}",
             baseline=baseline,
             direction=direction,
+            urgent=True,
         )
     if result.code in ("000", "404"):
-        return bad(f"OAuth 回调 {path}", value=result.code, baseline=baseline, direction=direction, semantics=semantics)
+        return bad(
+            f"OAuth 回调 {path}",
+            value=result.code,
+            baseline=baseline,
+            direction=direction,
+            semantics=semantics,
+            urgent=True,
+        )
     return ok(f"OAuth 回调 {path}", value=result.code, baseline=baseline, direction=direction, semantics=semantics)
 
 
@@ -195,9 +213,15 @@ def probe_oauth_proxy_port(port: int = 8090, *, timeout: int = 10, runner=subpro
     name = f"oauth-proxy {port} 实打"
     baseline, direction = "404", "000=netns 或进程断; 非 404 = 白名单可能失效"
     semantics = "这一跳是 oauth-proxy 不是 gateway(gateway 在容器内听 8080)。LISTEN 与 Up 都不是判据"
+    # 两个出口都 `urgent=True`: 这一跳断了公网就是 502, 而修法通常是重启 oauth-proxy ——
+    # 越早越好。它断过一次 29 小时, 那次全程没有任何告警。
     if not result.ok:
         return unknown(
-            name, reason=f"curl 没能给出状态码: {result.stderr or '无 stderr'}", baseline=baseline, direction=direction
+            name,
+            reason=f"curl 没能给出状态码: {result.stderr or '无 stderr'}",
+            baseline=baseline,
+            direction=direction,
+            urgent=True,
         )
     if result.code == "000":
         return bad(
@@ -206,6 +230,7 @@ def probe_oauth_proxy_port(port: int = 8090, *, timeout: int = 10, runner=subpro
             baseline=baseline,
             direction=direction,
             semantics=semantics,
+            urgent=True,
         )
     return ok(name, value=result.code, baseline=baseline, direction=direction, semantics=semantics)
 
@@ -378,6 +403,10 @@ def probe_feishu_wss(containers: tuple[str, ...], *, runner=subprocess.run) -> F
     # 那一个容器的用户消息已经没人收了, 而总和看起来仍然很健康。
     low = float(min(nums)) if nums else None
     if any(c.endswith("=0") for c in counts):
+        # `urgent=True` 只给这条 BAD, **不给上面那些 UNKNOWN**。与 vhost/oauth 的处理不同,
+        # 理由是那些 UNKNOWN 的成因是「宿主缺 ss」「非 root」「wss_containers 未配」—— 都是
+        # 本机环境问题, 一旦成立就每轮都成立, 于是它会变成又一个天天亮着的红灯。而掉到 0
+        # 是真的收不到用户消息, 那是事故。
         return bad(
             name,
             value=value,
@@ -387,6 +416,7 @@ def probe_feishu_wss(containers: tuple[str, ...], *, runner=subprocess.run) -> F
             num=low,
             num_warn=1.0,
             unit="条",
+            urgent=True,
         )
     return ok(
         name, value=value, baseline=baseline, direction=direction, semantics=semantics, num=low, num_warn=1.0, unit="条"

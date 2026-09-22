@@ -385,6 +385,55 @@ FUSION_MEMORY_TOKEN_MAP_FILE               XFYUN_STT_APP_ID / _API_KEY / _API_SE
 
 两份的**键集完全相同**（2026-09-16 实测双向 `comm` 都为空），只有值不同。主容器那份是 27 个键。
 
+#### 4.2.1 ⚠️ 两个私有容器的 `PSI_APPDATA` 必须由 compose 给
+
+**不要**按上面那句「去掉 `PSI_APPDATA`」照做了就完事 —— 2026-09-22 实测那是个观测缺口的
+成因。这两份 `.env` 里确实不该有它（三份 `.env` 各自维护同一个键，状态必然漂移：实测
+`workspace/.env` 有、另两份都没有），但**必须由 `docker-compose.yml` 的 `environment:`
+统一给**：
+
+```yaml
+# private-luolin / private-chengxx 两个服务都要加
+environment:
+  - PSI_APPDATA=/workspace/.psi/appdata
+```
+
+为什么不能只靠 `config.yml` 里那行 `appdata: /workspace/.psi/appdata`：它只喂到
+`Session`，而 `metrics.record()` 是**跨组件机制、不是组件**，手上没有 Session 句柄可问，
+走的是无参 `resolve_appdata_root()`。于是 histories 乖乖落在配置的目录下，`metrics/`
+却整个不出现 —— 落去了容器里并不存在的 platformdirs 兜底根
+（`/root/.local/share/Haitun`，实测 `exists: False`）。
+
+后果是**日报里「成本来源 luolin」「成本来源 chengxx」每天报「未测到」，当日总花费永远只是
+一个下限**（2026-09-22 实测 ≥0.9934 USD，只含 gateway 一个容器，即两个人的账整个不在
+总额里）。gateway 没中这一枪，只因为它的 `launch-gateway.sh` 传了 `--appdata` 且
+`Gateway._run_with_appdata` 会把解析结果导出到 `PSI_APPDATA`，而私有容器的
+`psi-agent run` 根本不经过 Gateway。
+
+**这个缺陷有两半，修法也是两半**：
+
+| | 落点 | 何时生效 |
+|---|---|---|
+| compose 加 `PSI_APPDATA` | 目标机 `docker-compose.yml`（不在 git，本仓改不了） | **重启即生效，不需要重建镜像** |
+| 内核对齐两个入口 | `src/psi_agent/session/__init__.py`：`Session.run()` 解析完 appdata 根后也导出 `PSI_APPDATA`，与 `Gateway._run_with_appdata` 一致 | 要**重建镜像**（`/app/src` 烤在镜像里，不是挂载） |
+
+两半都做：compose 那半是现在就能止血的，内核那半是让「只配 `config.yml` 的部署」将来不再
+踩同一个坑 —— 否则换个部署形态（不设 env、只写 config.yml）缺陷会原样复现，而症状仍是
+一行「未测到」。
+
+**判据不是「环境变量设上了」**，那不是用户遇到的故障。要在容器内确认
+`{appdata}/metrics/` 下真出现当天的 `.jsonl`，且**需要各自触发一条真消息**（没有回合就
+没有行）：
+
+```console
+$ for c in psi-agent-luolin psi-agent-chengxx; do \
+    echo "--- $c ---"; \
+    docker exec $c sh -c 'ls -la /workspace/.psi/appdata/metrics/ 2>&1 | tail -3'; \
+  done
+```
+
+再核日报那两项从「未测到」变成数字、且「当日总花费」不再标「下限」。
+
 ### 4.3 `fm-secrets/.config/fusion-memory/mcp.env`
 
 ```text

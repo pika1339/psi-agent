@@ -30,30 +30,59 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from pathlib import Path
 
 import cost
 from findings import Finding, bad, ok, unknown
 
-#: 收窄生效后应暴露的工具数。`232 of 232` 单看无异常, 只有知道**应是 66** 才叫异常 ——
-#: 而收窄机制上线后生产从来没有过 EXPOSED.txt, 每层都走了「未声明」分支暴露全量, 期间
-#: 请求体每回合带 289774 字符的工具 schema, 没有任何东西出过声。
-EXPECTED_EXPOSED = 66
+#: 兜底基线: 读不到清单文件时才用。收窄生效后应暴露的工具数 —— `232 of 232` 单看无异常,
+#: 只有知道「应该远少于 M」才叫异常, 而收窄机制上线后生产一度从来没有过 EXPOSED.txt,
+#: 每层都走了「未声明」分支暴露全量, 期间请求体每回合带 289774 字符的工具 schema,
+#: 没有任何东西出过声。
+#:
+#: **这个常数不是首选判据。** 它原本写死成 66(2026-09-14 清单 65 条时立的), 而清单随后在
+#: 9-16、9-21 两次扩到 89、90 条。于是 2026-09-22 日报把「实测 90」报成「比预期宽 24 个,
+#: 需处理」—— 而真相是清单本身就有 90 条、收窄完全按清单生效了。硬编码清单当基线不会在
+#: 落后时报警, 它会用一句自信的错话把责任指反, 让人去查一个没坏的机制。所以首选判据是
+#: **去读清单文件本身**(见 `_expected_exposed()`), 这个常数只在清单读不到时兜底。
+EXPECTED_EXPOSED_FALLBACK = 66
+
+#: 清单文件相对 workspace 的路径。收窄的依据就是它, 所以基线也该来自它。
+_MANIFEST_RELPATH = "tools/EXPOSED.txt"
 
 #: 单流上传带宽 KB/s, 实测值。首字延迟 ≈ 请求体字节数 ÷ 这个数。
 UPLOAD_KBPS = 230
 
-#: 请求体字节数 p95 告警线。工具 schema 实测 289774 字符, 占不可裁地板约 47%, 即地板本身
-#: 约 600 KiB —— 那已经意味着两秒半的纯上传。所以 600 KiB 是「地板水位」不是舒适线。
-REQ_BYTES_P95_WARN = 600 * 1024
+#: 请求体字节数 p95 告警线。
+#:
+#: 曾是 600 KiB —— 那个数来自「地板水位」的算法(工具 schema 实测 289774 字符, 占不可裁地板
+#: 约 47%, 即地板本身约 600 KiB)。问题是**地板不是告警线**: 定在地板上等于每天都红, 而
+#: 2026-09-22 连续几份日报实测 p95 在 1226 KiB 上下, 天天亮着。
+#:
+#: 一个天天亮着的红灯等于没有红灯 —— 它的实际效果是让人学会跳过异常那一节, 连带盖住
+#: 真正该看的那几条。所以按实测水位重定到 1500 KiB: 高于当前常态约 20%, 越线时才是
+#: 「今天比平常糟」而不是「今天和平常一样」。
+#:
+#: 数字仍每天进多维表格, 涨到 1500 KiB 以下的任何变化照旧能从表里看出趋势 —— 抬基线抬的
+#: 是「要不要现在喊人」, 不是「要不要记账」。
+REQ_BYTES_P95_WARN = 1500 * 1024
 
 #: 首字延迟 p95 告警线(秒)。按 600 KiB ÷ 230KB/s ≈ 2.6s 的地板留一倍余量。
+#:
+#: **这条没动**: 它至今没触发过, 说明当前水位在线以下, 抬它没有依据。
 TTFT_P95_WARN_S = 6.0
 
 #: 压缩次数/天告警线。实测 41.5s x 22 次 —— 22 次就是出事的那天的数字。
+#:
+#: **这条没动**: 同样没触发过。
 COMPACTION_COUNT_WARN = 10
 
 #: 压缩耗时 p50 告警线(秒)。
-COMPACTION_P50_WARN_S = 20.0
+#:
+#: 曾是 20s。实测 p50 稳定在 23s 上下(2026-09-22 那份是 23.2s), 也是天天亮着 —— 同
+#: `REQ_BYTES_P95_WARN` 一个毛病。重定到 45s: 比当前常态高一倍, 越线意味着压缩真的失控
+#: (出事那天是 41.5s 的均值), 而 23s 这个慢但稳定的常态由表里的趋势承担。
+COMPACTION_P50_WARN_S = 45.0
 
 
 def percentile(values: Sequence[float], q: float) -> float | None:
@@ -177,6 +206,41 @@ def probe_request_bytes(reads: Sequence[cost.SourceRead]) -> list[Finding]:
     ]
 
 
+def _expected_exposed(reads: Sequence[cost.SourceRead]) -> tuple[int, str]:
+    """暴露面基线 —— **去数清单文件里有多少条**, 不用写死的数字。
+
+    返回 `(条数, 这个数从哪来的说明)`。说明会进报告的 `baseline` 文本, 因为「基线是 90」和
+    「基线是 90 且它来自清单文件」在有人要判断该不该处理时是两回事。
+
+    为什么必须读文件: 收窄的依据就是这个清单, 所以清单扩了几条、暴露面就该多几个 —— 二者
+    本来是同一个数。写死一个常数等于给同一件事保存两份真相, 而它们只会越走越远:
+    2026-09-22 实测的后果是把「实测 90」报成「比预期宽 24 个, 需处理」, 因为常数还停在
+    9-14 清单 65 条那会儿的 66。硬编码基线落后时**不会报警**, 它会用一句自信的错话把责任
+    指反, 让人去查一个没坏的机制。
+
+    读哪一份: 从 `reads` 里拿各来源的 appdata 路径反推 workspace 根(appdata 是
+    `<workspace>/.psi/appdata`, 故上两级), 取**第一份读得到的**。三份 workspace 的清单实测
+    同步投放、内容一致, 所以取第一份够了; 若都读不到才退到常数兜底。
+    """
+    for read in reads:
+        root = Path(read.root) if read.root else None
+        if root is None:
+            continue
+        manifest = root.parent.parent / _MANIFEST_RELPATH
+        try:
+            text = manifest.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # 注释行与空行不算条目 —— 清单文件里注释占了相当篇幅, 连注释一起数会把基线抬高一截。
+        count = sum(1 for line in text.splitlines() if line.strip() and not line.strip().startswith("#"))
+        if count:
+            return count, f"清单 {manifest.name} {count} 条"
+    return (
+        EXPECTED_EXPOSED_FALLBACK,
+        f"清单文件读不到, 退到写死的 {EXPECTED_EXPOSED_FALLBACK}(可能已过时)",
+    )
+
+
 def probe_tools_exposed(reads: Sequence[cost.SourceRead]) -> list[Finding]:
     """`tools_exposed=N of M` 的**比值**, 不是只看 N。
 
@@ -185,7 +249,10 @@ def probe_tools_exposed(reads: Sequence[cost.SourceRead]) -> list[Finding]:
 
     所以判据分三档, N == M 那档单独成一条 BAD 并明说「收窄未生效」: 它与「N 略高于基线」
     是两种不同的修法(前者补清单文件, 后者调分层规则)。
+
+    基线由 `_expected_exposed()` **数清单文件**得出, 不写死 —— 见那个函数的说明。
     """
+    expected, expected_src = _expected_exposed(reads)
     turns = _turns(reads)
     pairs: list[tuple[int, int]] = []
     for row in turns:
@@ -205,7 +272,7 @@ def probe_tools_exposed(reads: Sequence[cost.SourceRead]) -> list[Finding]:
                     if turns
                     else "没有 turn 行可读(metrics 未落盘, 或当日无回合)"
                 ),
-                baseline=f"N ≈ {EXPECTED_EXPOSED}, 且 N < M",
+                baseline=f"N ≈ {expected}({expected_src}), 且 N < M",
                 direction="N == M 表示收窄完全未生效",
             )
         ]
@@ -214,7 +281,7 @@ def probe_tools_exposed(reads: Sequence[cost.SourceRead]) -> list[Finding]:
     exposed, total = pairs[-1]
     ratio = exposed * 100.0 / total if total else 0.0
     value = f"{exposed} of {total} ({ratio:.0f}%, {len(pairs)} 个回合)"
-    baseline = f"N ≈ {EXPECTED_EXPOSED}, 且 N < M"
+    baseline = f"N ≈ {expected}({expected_src}), 且 N < M"
 
     if total and exposed == total:
         return [
@@ -227,14 +294,15 @@ def probe_tools_exposed(reads: Sequence[cost.SourceRead]) -> list[Finding]:
                 "日志可能同时汇报「机制已启用」—— 那句话只说明代码路径在, 不说明清单文件在",
             )
         ]
-    if exposed > EXPECTED_EXPOSED:
+    if exposed > expected:
         return [
             bad(
                 "工具暴露比值 N/M",
                 value,
                 baseline,
                 "越高越糟 —— 每多一个工具都是每回合都要上传的 schema",
-                f"收窄生效了但暴露面比预期宽 {exposed - EXPECTED_EXPOSED} 个",
+                f"收窄生效了但暴露面比 {expected_src} 多 {exposed - expected} 个 —— "
+                "两处不一致时先核清单, 别先怀疑收窄机制",
             )
         ]
     return [ok("工具暴露比值 N/M", value, baseline, "N == M 表示收窄完全未生效")]

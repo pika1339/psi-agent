@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -91,13 +92,41 @@ class Session:
         appdata_root = self.appdata.strip()
         if not appdata_root:
             appdata_root = await resolve_appdata_root()
+        # So process-wide mechanisms that have no Session handle to ask resolve to the
+        # same root this Session writes history to.  ``metrics.record`` is the one that
+        # made this necessary: it is a mechanism, not a component (see metrics.py's
+        # docstring), so it takes no ``appdata`` argument and calls
+        # ``resolve_appdata_root()`` bare — which ignores ``appdata:`` from config.yml
+        # and lands on platformdirs.
+        #
+        # Measured on the ToB deployment 2026-09-22: the two private containers set
+        # ``appdata: /workspace/.psi/appdata`` in config.yml and their histories do land
+        # there, yet ``{appdata}/metrics/`` never appeared and the daily report read
+        # "成本来源 luolin 未测到" every day — the rows went to
+        # ``/root/.local/share/Haitun`` instead, a path that does not exist in those
+        # containers. The gateway container was unaffected only because
+        # ``Gateway._run_with_appdata`` already does this same export (gateway/__init__.py),
+        # and ``psi-agent run`` for the private containers never goes through Gateway.
+        # So this line closes an asymmetry between the two entry points, it does not
+        # invent a new convention.
+        #
+        # Deliberately an export rather than threading ``appdata_root`` down to
+        # ``metrics.record``'s two call sites: those sit in ``agent.py``'s turn loop and
+        # the root is not a property of a turn. Making it a ``record()`` parameter also
+        # means every future call site must remember to pass it, and forgetting is
+        # silent — exactly the failure this is fixing.
+        os.environ["PSI_APPDATA"] = appdata_root
         active = self._name_set(self.active_schedules)
         deactive = self._name_set(self.deactive_schedules)
 
         logger.info(f"Loading workspace from {workspace_path}")
         if agent_path != workspace_path:
             logger.info(f"Loading agent package from {agent_path}")
-        logger.info(f"AppData history root: {appdata_root}")
+        # Says "AppData root", not "history root": since the export above, this one
+        # directory is where metrics jsonl lands too. The old wording read as if it
+        # bounded the line to histories/, which is how the metrics gap stayed invisible
+        # in logs that were printing the correct path all along.
+        logger.info(f"AppData root: {appdata_root}")
         if active:
             names = "all" if ACTIVATE_ALL in active else sorted(active)
             logger.info(f"Active schedules under {workspace_path / 'schedules'}: {names}")

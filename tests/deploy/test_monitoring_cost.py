@@ -136,6 +136,31 @@ def test_cached_price_is_lower_than_prompt_price() -> None:
             assert item["cached"] < item["prompt"], f"{path.name}:{name} 缓存单价没有更低"
 
 
+def test_latest_pricing_table_prices_the_model_the_kernel_actually_records() -> None:
+    """**最新一版**单价表必须给线上实际跑的那个模型定价。
+
+    2026-09-22 实测的失败: v1/v2 的键是 `deepseek-chat` / `deepseek-reasoner`, 而埋点记下来的
+    `model` 是 `deepseek-flash` —— 两个名字空间完全不相交, 于是每一行都落进「未定价」、当日
+    总花费恒为 `0` 下限。**这个失败不报错**: 报告老实打了「未定价 1 个」并标了下限, 可是
+    「一张从没对上过的表」和「今天恰好没花钱」在输出里长得几乎一样, 于是那份日报连着发多久
+    都不会有人发现成本一栏其实从来没生效。
+
+    键名必须跟**上游响应体**的 `model`, 不跟我们请求时发的名字 —— 实测请求
+    `deepseek-v4-flash` 而响应体回 `deepseek-flash`, `ai_client._usage_of()` 取的是后者。
+
+    这条只管**最新一版**: 旧版表是历史凭据, 按当时的模型名写就是对的, 拿今天的模型名去要求
+    它们等于篡改历史账。所以断言落在 `load_pricing()` 不带 `on_date` 选出来的那一版上 ——
+    这也正是日报真实走的那条路径, 而不是遍历目录。
+    """
+    latest = cost.load_pricing(directory=_PRICING)
+    # 写死上游响应体那个名字, 不从 .env 或 litellm 配置里读: 那两处填的是**请求名**, 拿它
+    # 当预期会把这条判据变成「配置与配置自比」, 而这次的缺陷恰恰是请求名与响应名不同。
+    assert latest.price_of("deepseek-flash") is not None, (
+        f"最新一版 {latest.version} 没给 deepseek-flash 定价 —— 线上每一行都会算成未定价, "
+        f"总花费恒为 0 下限; 现有键: {sorted(latest.models)}"
+    )
+
+
 def test_load_pricing_picks_latest_effective_not_later_than_date(v1: Any) -> None:
     """选版按 `effective_date`, 不按文件 mtime。
 
@@ -326,6 +351,61 @@ def test_no_usage_turns_get_their_own_column_and_total_is_lower_bound(tmp_path: 
     assert totals.total.amount == pytest.approx(cost.cost_of_row(_turn("s1"), v1).amount)
     text = cost.render_cost_section(totals)
     assert "下限" in text and "2 个回合无 usage" in text
+
+
+def test_no_usage_row_with_tokens_present_is_still_excluded(tmp_path: Path, v1: Any) -> None:
+    """**token 字段齐全但 `usage_reported=false` 的行, 照样不许算钱。**
+
+    上面三条阴性判据都把 token 一起设成 `None`, 于是它们共有一个盲区。**不是**「完全不看
+    `usage_reported`」那种 —— 那种它们抓得住(实测把整个判断改成 `if False` 时三条全红)。
+    漏的是**条件性**的那种: `if not usage_reported and prompt is None` —— 即「没 token 时
+    才尊重这个标志, 有 token 就照算」。实测这一变异下上面三条全绿, 只有本条转红。
+
+    而真实的缺 usage 行恰恰**带着完整 token**(生产实测: 上游没报 usage, 但埋点自己记下的
+    prompt/completion/cached 都在), 正落在那个盲区里。那种实现会把它算进总额, 且总额不再
+    标下限 —— 结果是「未测到」这件事整个消失, 而金额看起来更完整、更可信。
+
+    所以这条判据的形状: 同一行数据只改 `usage_reported` 一个布尔值, 断言
+    (1) 算不出且 `gap == "no_usage"`;
+    (2) 它**本来会**算出一个明显非零的金额 —— 把「被排除的量」量出来, 否则「等于 None」
+        可能只是因为这行根本没钱可算, 判据就退化成了同义反复;
+    (3) 汇总里总额不含它、且 `is_lower_bound` 为真。
+
+    2026-09-22 生产实测的正是这一形状: 从真实 metrics 里取一行 turn, 只把
+    `usage_reported` 翻成 false(66428 prompt / 1679 completion / deepseek-flash 全部保留),
+    单源控制实验两侧金额到小数第 8 位完全相同(1.07890122), `no_usage` 0→1,
+    `is_lower_bound` False→True, 被排除的量是 0.00260035 USD。
+    """
+    billable = dict(_turn("s-gap", prompt=66428, cached=65792, completion=1679, reasoning=1674))
+    withheld = dict(billable, usage_reported=False)
+
+    # (2) 先量「本来会算出多少」—— 这个数必须明显非零, 否则下面的 None 说明不了问题。
+    would_be = cost.cost_of_row(billable, v1).amount
+    assert would_be is not None and would_be > 0
+
+    # (1) 只翻一个布尔值, 金额就必须变成算不出。
+    rc = cost.cost_of_row(withheld, v1)
+    assert rc.gap == "no_usage"
+    assert rc.amount is None, f"带 token 的缺 usage 行被算成了 {rc.amount} —— 它本会是 {would_be}"
+    # token 本身仍要留在结果里(报告要能说「这行有 token 但没 usage」), 缺的只是金额。
+    assert rc.prompt_tokens == 66428 and rc.completion_tokens == 1679
+
+    # (3) 汇总层: 一个正常行 + 一个带 token 的缺 usage 行。总额只含前者。
+    root = tmp_path / "gw"
+    normal = _turn("s-ok", prompt=1000, cached=0, completion=100)
+    _write_source(root, "2026-09-18", [normal, withheld])
+    totals = cost.summarize([cost.read_source("gateway", root)], v1)
+
+    assert totals.total.no_usage == 1
+    assert totals.total.turns == 2, "缺 usage 的行仍要进分母 —— 不进的话占比会偏低"
+    assert totals.is_lower_bound
+    only_normal = cost.cost_of_row(normal, v1).amount
+    assert only_normal is not None
+    assert totals.total.amount == pytest.approx(only_normal), (
+        "总额里混进了缺 usage 那行的钱 —— 那个数会以「实测花费」的名义传下去"
+    )
+    # 「不少算」的另一半: 被排除的量不许悄悄消失, 报告要说有这么一行。
+    assert "1 个回合无 usage" in totals.lower_bound_note()
 
 
 def test_unknown_model_counted_as_unpriced_not_free(tmp_path: Path, v1: Any) -> None:

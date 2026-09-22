@@ -80,6 +80,20 @@ class Finding:
     #:
     #: 与 `num` 同规: UNKNOWN 不得带 —— 没量到在表里是空格子。
     extra_nums: dict[str, float] = field(default_factory=dict)
+    #: **这一项坏掉时值不值得马上把人喊来。**
+    #:
+    #: 默认 False —— 绝大多数指标不值得。值得的只有一类: **服务对外不可用**(vhost 非 200、
+    #: oauth-proxy 8090 不通、进程被 OOM 杀掉、飞书长连接断)。那几项坏了, 用户此刻就在
+    #: 撞墙, 而且修法通常是「重启点什么」, 越早越好。
+    #:
+    #: 为什么做成字段而不是在 `run.py` 里按名字列一张清单: 清单会和探针脱节 —— 加一个新探针
+    #: 的人不会想到去改另一个文件里的名字清单, 于是新探针默认落进「静默」那一侧, 而这种漏
+    #: 不会让任何测试变红。硬编码清单当判据把责任指反这件事踩过两次。放在字段上, 紧急性由
+    #: 写探针的人在同一处声明。
+    #:
+    #: 与 `status` 是两个维度: `urgent=True` 只说「**如果**它坏了就要喊人」, 坏没坏由
+    #: `status` 说。OK 的紧急项不发消息。
+    urgent: bool = False
 
     def __post_init__(self) -> None:
         if self.status not in (OK, BAD, UNKNOWN):
@@ -116,6 +130,7 @@ def ok(
     num_warn: float | None = None,
     unit: str = "",
     extra_nums: dict[str, float] | None = None,
+    urgent: bool = False,
 ) -> Finding:
     return Finding(
         name=name,
@@ -128,6 +143,7 @@ def ok(
         num_warn=num_warn,
         unit=unit,
         extra_nums=dict(extra_nums or {}),
+        urgent=urgent,
     )
 
 
@@ -142,6 +158,7 @@ def bad(
     num_warn: float | None = None,
     unit: str = "",
     extra_nums: dict[str, float] | None = None,
+    urgent: bool = False,
 ) -> Finding:
     return Finding(
         name=name,
@@ -154,11 +171,24 @@ def bad(
         num_warn=num_warn,
         unit=unit,
         extra_nums=dict(extra_nums or {}),
+        urgent=urgent,
     )
 
 
-def unknown(name: str, reason: str, baseline: str, direction: str, semantics: str = "") -> Finding:
-    """没量到。**不要用 `ok(value="0")` 代替** —— 见模块 docstring。"""
+def unknown(
+    name: str,
+    reason: str,
+    baseline: str,
+    direction: str,
+    semantics: str = "",
+    *,
+    urgent: bool = False,
+) -> Finding:
+    """没量到。**不要用 `ok(value="0")` 代替** —— 见模块 docstring。
+
+    `urgent` 在这里同样有意义: 一个紧急项**没量到**与它坏掉同级 —— 探针瞎了的时候, 服务
+    是死是活没人知道。所以 vhost 探针抛异常那条 UNKNOWN 也该喊人。
+    """
     return Finding(
         name=name,
         status=UNKNOWN,
@@ -167,6 +197,7 @@ def unknown(name: str, reason: str, baseline: str, direction: str, semantics: st
         direction=direction,
         reason=reason,
         semantics=semantics,
+        urgent=urgent,
     )
 
 
@@ -205,3 +236,14 @@ class Report:
         **UNKNOWN 也算**: 探针瞎了与服务挂了在后果上同级, 都意味着这一轮没人在看。
         """
         return bool(self.of(BAD) or self.of(UNKNOWN))
+
+    def urgent_anomalies(self) -> list[Finding]:
+        """坏掉或没量到的**紧急**项 —— 日报据此决定要不要发群。
+
+        与 `has_anomaly` 分开: 那个是「有没有事」(决定要不要在正文里排最前), 这个是「要不要
+        现在把人喊来」。字节数涨了 20% 是有事但不紧急, vhost 502 是两者都成立。
+
+        返回列表而不是 bool: 发群的那条消息要点名是哪几项紧急, 只给 bool 的话调用方得再筛
+        一遍, 而两处筛法早晚会不一致。
+        """
+        return [f for f in self.findings if f.urgent and f.status in (BAD, UNKNOWN)]

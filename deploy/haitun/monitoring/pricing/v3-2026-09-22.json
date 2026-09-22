@@ -1,0 +1,24 @@
+{
+  "version": "v3-2026-09-22",
+  "effective_date": "2026-09-22",
+  "currency": "USD",
+  "unit_tokens": 1000000,
+  "source": "2026-09-22 抄自 https://api-docs.deepseek.com/quick_start/pricing。未与账单对过。上游页面只写 $ 符号、不写币种代码, 按 DeepSeek API 的常规计费判为 USD —— 这一判断本身没有页面原文支撑, 是推断。",
+  "note": "键名用**上游响应体里的 `model` 值**, 不是我们请求时发的名字。实测 2026-09-22: 请求 `deepseek-v4-flash`, 响应体回 `deepseek-flash`, 而埋点记的是响应体那个。v1/v2 用的 `deepseek-chat`/`deepseek-reasoner` 与线上实际出现的 model 值完全不相交, 于是每一行都落进「未定价」、总花费恒为 0 下限 —— 键名空间对不上时表不会报错, 只会安静地把所有钱算成 0。\n\n单价取的是**峰值价(上界)**。上游是分时计价: 峰值窗口为 UTC 01:00-04:00 与 06:00-10:00 的工作日(排除中国法定节假日), 其余时段(含周末整日)为平峰, 平峰价是峰值的一半。本表结构没有分时维度, 若填平峰价则峰值时段的花费会被系统性低估一半 —— 而本层所有金额的诚实性建立在「是下限」这个方向上, 低估会把方向反过来。填峰值价则算出的是**上界**, 真实花费只会更低。报告里那句「未与账单对过」同时也覆盖这件事。\n\n`deepseek-v4-flash`(我们 .env 里配的那个名字)在上游**已退役**, 调用被路由到 V4.1-Flash 并按 Flash 价计费。它不作为键出现在这里 —— 键只跟响应体, 而响应体永远回 `deepseek-flash`。",
+  "models": {
+    "deepseek-flash": {
+      "prompt": 0.3,
+      "cached": 0.006,
+      "completion": 1.2,
+      "reasoning": 1.2,
+      "reasoning_in_completion": true
+    },
+    "deepseek-v4-pro": {
+      "prompt": 1.32,
+      "cached": 0.044,
+      "completion": 3.96,
+      "reasoning": 3.96,
+      "reasoning_in_completion": true
+    }
+  }
+}

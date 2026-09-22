@@ -85,6 +85,64 @@ class FakeOpener:
         return FakeResp(raw)
 
 
+@dataclass
+class FakeTable:
+    """一张**字段集合真的会变**的假表。建列/改名会落到 `fields` 上, 而 `records/search`
+    过滤一个不存在的字段时回 `code=1254018 InvalidFilter` —— 2026-09-22 在一张新建 base 上
+    实测到的那一下。
+
+    为什么不用上面的 `FakeOpener`: 它对任何没预设的路径一律回 `code 0`, 于是「主字段名字
+    不对」这件事在它下面**没有后果** —— 一个不改名的实现照样全绿。判据要压的恰恰是后果。
+    """
+
+    fields: list[dict]
+    calls: list[tuple[str, str, dict | None]] = field(default_factory=list)
+
+    @property
+    def names(self) -> list[str]:
+        return [f["field_name"] for f in self.fields]
+
+    def open(self, req, timeout=None):
+        path = req.full_url.split("/open-apis", 1)[-1]
+        body = json.loads(req.data.decode("utf-8")) if req.data else None
+        method = req.get_method()
+        self.calls.append((method, path, body))
+        return FakeResp(json.dumps(self._handle(method, path, body), ensure_ascii=False).encode("utf-8"))
+
+    def _handle(self, method: str, path: str, body: dict | None) -> dict:
+        if "/fields" in path and method == "GET":
+            return {"code": 0, "data": {"items": [dict(f) for f in self.fields]}}
+        if path.endswith("/fields") and method == "POST":
+            assert body is not None
+            if body["field_name"] in self.names:
+                # 飞书对重名建列回错误 —— 主字段已占位时「新建一个 PRIMARY 列」走的就是这条。
+                return {"code": 1254011, "msg": "FieldNameRepeat"}
+            self.fields.append(
+                {"field_id": f"fld{len(self.fields)}", "field_name": body["field_name"], "type": body["type"]}
+            )
+            return {"code": 0, "data": {}}
+        if "/fields/" in path and method == "PUT":
+            assert body is not None
+            target = next((f for f in self.fields if f["field_id"] == path.rsplit("/", 1)[-1]), None)
+            if target is None:
+                return {"code": 1254042, "msg": "FieldIdNotFound"}
+            target["field_name"] = body["field_name"]
+            target["type"] = body["type"]
+            return {"code": 0, "data": {}}
+        if "records/search" in path:
+            assert body is not None
+            wanted = body["filter"]["conditions"][0]["field_name"]
+            if wanted not in self.names:
+                return {"code": 1254018, "msg": "InvalidFilter"}
+            return {"code": 0, "data": {"items": []}}
+        if path.endswith("/records") and method == "POST":
+            missing = [k for k in ((body or {}).get("fields") or {}) if k not in self.names]
+            if missing:
+                return {"code": 1254045, "msg": f"FieldNameNotFound: {missing}"}
+            return {"code": 0, "data": {"record": {"record_id": "recNEW"}}}
+        return {"code": 0, "data": {}}
+
+
 def _report(*items) -> object:
     report = findings.Report(tier="日报", timestamp="T")
     for item in items:
@@ -436,6 +494,68 @@ def test_ensure_schema_creates_only_the_missing_columns():
     types = {b["field_name"]: b["type"] for m, p, b in opener.calls if m == "POST" and b and "field_name" in b}
     assert set(types) == set(bitable.NUMERIC_COLUMNS)
     assert set(types.values()) == {2}, "数字列必须是数字类型(2) —— 文本类型的列画不出折线"
+
+
+def test_a_brand_new_table_can_be_written_after_ensure_schema():
+    """**新建 base 的自带主字段叫「多行文本」** → 改名成 PRIMARY, 而且紧接着的写入要成功。
+
+    2026-09-22 实测: 飞书新建 table 自带一个 `is_primary` 的文本字段, 默认名「多行文本」。
+    `ensure_schema` 原先「只补缺的列」的契约意味着它既不会改这个字段, 也不会新建一个叫
+    「日期」的列(主字段已占位, 重名建列直接被拒)。于是首次 `write_row` 的那次 search 打在
+    一个不存在的字段上, 回 `code=1254018 InvalidFilter`。
+
+    判据必须跑到 `write_row`: 只断言「改名成功」会漏掉真正的故障形态 —— 用户遇到的不是
+    「字段名不对」, 是**第一次写入就挂**。
+    """
+    table = FakeTable(fields=[{"field_id": "fld0", "field_name": "多行文本", "type": 1, "is_primary": True}])
+    bitable.ensure_schema("app", "tbl", "tok", opener=table)
+
+    primary = next(f for f in table.fields if f.get("is_primary"))
+    assert primary["field_name"] == bitable.PRIMARY, f"主字段没改名, 实收 {table.names}"
+    assert table.names.count(bitable.PRIMARY) == 1, f"PRIMARY 不该既改名又新建, 实收 {table.names}"
+
+    action, rid = bitable.write_row("app", "tbl", "tok", bitable.build_row(_report(), day="2026-09-22"), opener=table)
+    assert (action, rid) == ("created", "recNEW")
+
+
+def test_ensure_schema_does_not_rename_a_non_primary_field():
+    """主字段是**唯一**的改名例外: 同一张表里的普通列必须留着不动。
+
+    修法很容易顺手放宽成「名字不对就改」, 而那会把人手加的列改掉, 或者在两个指标列之间
+    互相改名。这条钉住边界: 非主字段只做「缺了才新建」。
+
+    表的形状**刻意让改名那段真的执行**(PRIMARY 缺席, 主字段名字不对), 而人手加的那一列
+    排在主字段**前面** —— 否则「改第一个字段」这种放宽写法会撞上主字段而看不出区别, 判据
+    就只是在测一条根本没跑到的分支。
+    """
+    table = FakeTable(
+        fields=[
+            {"field_id": "fld0", "field_name": "人手加的备注", "type": 1},
+            {"field_id": "fld1", "field_name": "多行文本", "type": 1, "is_primary": True},
+        ]
+    )
+    bitable.ensure_schema("app", "tbl", "tok", opener=table)
+    assert "人手加的备注" in table.names, f"非主字段被改掉了, 实收 {table.names}"
+    renamed = [b["field_name"] for m, p, b in table.calls if m == "PUT" and "/fields/" in p and b]
+    assert renamed == [bitable.PRIMARY], f"只该改主字段这一次, 实收 {renamed}"
+    primary = next(f for f in table.fields if f.get("is_primary"))
+    assert primary["field_name"] == bitable.PRIMARY
+    # 类型必须是文本(1), 不能顺手改成日期(5): 日期类型存的是毫秒时间戳, search 时的时区
+    # 归一化会让「今天」在边界上对不上 —— 见 `bitable.PRIMARY` 的注释。改名那一步同时带
+    # 类型, 所以这里是唯一能钉住它的地方; 少了这条, 一个改成日期类型的实现全绿。
+    assert primary["type"] == 1, f"主字段必须是文本类型(1), 实收 {primary['type']}"
+
+
+def test_ensure_schema_does_not_rename_when_the_primary_is_already_right():
+    """名字已经对了 → **一次改名请求都不该发**。
+
+    幂等: 这个函数每天跑一遍。多发一次 PUT 不会报错(改成同名是空操作), 所以少了这条判据,
+    一个「每次都无条件改一遍」的实现看不出任何区别。
+    """
+    table = FakeTable(fields=[{"field_id": "fld0", "field_name": bitable.PRIMARY, "type": 1, "is_primary": True}])
+    bitable.ensure_schema("app", "tbl", "tok", opener=table)
+    renames = [(p, b) for m, p, b in table.calls if m == "PUT" and "/fields/" in p]
+    assert renames == [], f"名字对时不该有改名请求, 实收 {renames}"
 
 
 def test_push_reports_and_returns_false_when_config_is_incomplete():

@@ -255,9 +255,16 @@ def _parse_pricing(parsed: object, path: Path) -> Pricing:
 
 #: 生产三个容器的 appdata 在**宿主**上的位置(已实测 bind mount, 宿主可直接读)。
 #:
-#: 只有 gateway 显式设了 `PSI_APPDATA=/workspace/.psi/appdata`; 另两个没设, 落回
-#: platformdirs 默认, 而容器内 `/root/.local/share/` 不存在 —— 实际也写到了
-#: `/workspace/.psi/appdata`。
+#: 三个容器都把 appdata 定在 `/workspace/.psi/appdata`, 但**走的是两条不同的路**:
+#: gateway 由 `launch-gateway.sh` 传 `--appdata`(且 `workspace/.env` 里也有
+#: `PSI_APPDATA`), 两个私有容器由 compose 的 `environment:` 给(2026-09-22 补上)。
+#:
+#: 这里原本写着「另两个没设, 落回 platformdirs 默认 …… 实际也写到了
+#: `/workspace/.psi/appdata`」—— **那句话是错的**, 2026-09-22 实测推翻: 私有容器的
+#: histories 确实在这个目录下, 但 `metrics/` 整个不存在, 因为 `metrics.record()` 走的是
+#: 无参 `resolve_appdata_root()`, 拿不到 `config.yml` 的 `appdata:`, 落去了容器里并不
+#: 存在的 platformdirs 兜底根。于是本模块对这两个来源连报了几天「未测到」, 而这段注释
+#: 用一句自信的错话把人指向「路径配错了」。
 #:
 #: 三份都读: 生产**一人一容器**, 容器就是成本归因的一个维度。少读一份不是少一点数据,
 #: 是少一个人的账。
@@ -341,11 +348,19 @@ def read_source(
 
     metrics_dir = root_path / "metrics"
     if not metrics_dir.is_dir():
+        # 措辞从「首次部署前正常」改掉。那句话把一个**真缺口**说成了预期状态, 于是它在日报里
+        # 连着好几天没人追 —— 而 2026-09-22 查下来真因是: `workspace-luolin/.env` 与
+        # `workspace-chengxx/.env` 里都没有 `PSI_APPDATA` 这一行(只有 gateway 那份有)。
+        # 三个容器的 `metrics.py` md5 一致, 埋点代码都在, 容器里全盘找不到一个 .jsonl ——
+        # 即埋点写不出来, 不是还没开始写。
+        #
+        # 这条分支本身仍是通用的(任何来源的 metrics/ 不在都会走到这儿), 所以不写死那两个
+        # 容器名, 只把「这多半是配置问题」摆出来, 并点出第一个该查的地方。
         return SourceRead(
             name,
             str(root_path),
             UNKNOWN,
-            reason=f"metrics/ 目录不存在(首次部署前正常): {metrics_dir}",
+            reason=f"metrics/ 目录不存在 —— 埋点没往这儿写过(先查该容器 .env 的 PSI_APPDATA): {metrics_dir}",
         )
 
     if days is None:
@@ -732,7 +747,7 @@ def _rows(store: dict[str, Bucket], currency: str, *, limit: int = 0) -> list[st
     return out
 
 
-def render_cost_section(totals: CostTotals, *, session_limit: int = 10) -> str:
+def render_cost_section(totals: CostTotals, *, session_limit: int = 10, brief: bool = False) -> str:
     """成本一节的纯文本。**日报卡直接用这个, 不自己拼。**
 
     三条硬要求都在这里兑现:
@@ -743,6 +758,18 @@ def render_cost_section(totals: CostTotals, *, session_limit: int = 10) -> str:
     2. 「未测到」独立成节, 且总额带下限说明 —— **不静默算 0 元**;
     3. 缓存只在**钱**这一节出现, 并附一句它不影响首字延迟。延迟归 D 卡那侧的字节/带宽
        一节, 两件事分开写, 谁也不解释对方。
+
+    ## `brief`: 发群里的那份不带归因明细
+
+    实测 2026-09-22 的日报 62 行里这一节占 33 行, 其中四张归因表(按容器/按用途/按模型/
+    按会话)占 20 行 —— 而**那四张表的内容每天都在多维表格里**(一天一行 16 列), 群消息里
+    再抄一遍是同一份数据的第二个副本。负责人的原话是「群里发的为什么要说这么多废话」。
+
+    `brief=True` 只留: 抬头(版本号 + 未对账)、合计、下限警告、未测到来源、解析失败行数。
+    **砍掉的是明细, 不是任何一条诚实性声明** —— 下限与未测到照旧出现, 因为那两条回答的是
+    「这个数能不能信」, 而归因回答的是「钱花在谁身上」, 后者不急在五分钟内知道。
+
+    月报(`monthly_cost.py`)与命令行照旧用全文, 那两处是**拿来查的**, 明细正是它们的用途。
     """
     cur = totals.currency
     lines: list[str] = []
@@ -760,11 +787,25 @@ def render_cost_section(totals: CostTotals, *, session_limit: int = 10) -> str:
     if unknown:
         lines.append("")
         lines.append(f"  未测到 {len(unknown)} 个来源(观测缺口, **不等于零花费**):")
-        for s in unknown:
-            lines.append(f"    {s.name}: 未测到 —— {s.reason}")
+        if brief:
+            # 群里那份**只点名, 不抄原因**: 每个未测到的来源在上面的「未测到」一节里已经有
+            # 自己的条目和原因(那节归了组还截了断), 这里再抄一遍完整路径就是同一句话第二次
+            # 出现 —— 实测两个来源在一份 33 行的日报里贡献了 2 行 300 字符的重复文本。
+            #
+            # 「不等于零花费」那句标题留着: 它是这一节存在的理由, 而且它回答的是金额能不能信,
+            # 不是「哪个来源瞎了」。
+            lines.append("    " + ", ".join(s.name for s in unknown) + "  (原因见上面「未测到」一节)")
+        else:
+            for s in unknown:
+                lines.append(f"    {s.name}: 未测到 —— {s.reason}")
 
     if totals.malformed_rows:
         lines.append(f"  ⚠ {totals.malformed_rows} 行解析失败, 这些行的花费未计入")
+
+    if brief:
+        # 归因明细到此为止。留一行指路 —— 不写这行, 收信人会以为归因没人算。
+        lines.append("  (按容器/用途/模型/会话的明细见多维表格)")
+        return "\n".join(lines)
 
     if totals.by_container:
         lines.append("")

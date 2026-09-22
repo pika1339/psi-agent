@@ -8,10 +8,23 @@
 # 读取顺序: 环境变量 `HAITUN_MONITOR_<KEY>` 优先, 否则本文件。生产实际走本文件, 因为
 # cron 的环境里没有登录 shell 的 profile。
 
-# 飞书**自定义机器人** webhook URL。
-# 刻意不用 app token: app token 走 OAuth, 而 OAuth 回调正是坏过的那条路 —— 监控不能依赖
-# 它监控的东西。自定义机器人是一次裸 HTTP POST, 不依赖本机任何服务。
-webhook_url=https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE-ME
+# ── 消息发到哪儿: 两条通路, 配一条就行 ──────────────────────────────────────
+#
+# 首选 `feishu_chat_id`(应用机器人): 应用凭据本来就为多维表格配了, 用它不必再建一个自定义
+# 机器人、再多管一份凭据。少一份凭据就少一个会过期而没人发现的东西。
+# 见下方 feishu_app_id/feishu_app_secret —— 走这条路时那两项必填, 且机器人要被拉进群。
+#
+# **更正一处旧说法。** 这份样例原先写「刻意不用 app token: app token 走 OAuth, 而 OAuth
+# 回调正是坏过的那条路」—— 事实不成立。tenant_access_token 是一次**出站** POST 拿 token,
+# 与本机入站的 OAuth 回调(经 oauth-proxy)无关。2026-09-22 生产实测: 取 token 加发消息全程
+# 只有出站 HTTPS, 不经 gateway 也不经 oauth-proxy。两条通路都满足「监控不依赖它监控的东西」。
+#
+# chat_id 怎么取: 把机器人拉进群, 群设置里可见; 或用 im/v1/chats 列出。形如 oc_ 开头。
+feishu_chat_id=
+
+# 备选: 飞书**自定义机器人** webhook URL。`feishu_chat_id` 为空时才用这条。
+# 它是凭据 —— 拿到就能往群里发任意消息。
+webhook_url=
 
 # 要探的 vhost, 逗号分隔, `域名:期望状态码`(省略状态码则默认 200)。
 # 留空则第 1 类整类报「未测到」而不是「全部健康」—— 配置缺失不是健康。
@@ -59,8 +72,11 @@ timeout_seconds=10
 # 这四项全空则不写表, 只发消息。缺一项也不写, 并在 cron 日志里说缺哪一项 —— 静默跳过会让
 # 「表里一直没有新行」查不到原因。
 #
-# 与 webhook 的分工: 写表要**应用身份**(tenant access token), 而应用身份走的是 open API,
-# 不是 OAuth 回调那条坏过的路。消息仍走自定义机器人, 所以哪怕应用凭据整个失效, 告警照发。
+# 写表要**应用身份**(tenant access token), 走 open API 的出站请求, 不经 OAuth 回调。
+#
+# 注意一处代价: 走 `feishu_chat_id` 发消息时, 消息与写表共用这一份应用凭据 —— 凭据失效
+# 会让告警和趋势表**同时**哑掉。走 webhook 时两者是独立的。这是上面选 chat_id 的已知代价:
+# 换来的是少管一份凭据。真要两者独立, 就改回配 webhook_url 并把 feishu_chat_id 留空。
 
 # 飞书自建应用凭据。**app_secret 是凭据**, 与 webhook_url 同级: 只存在于这个 0600 文件里。
 # 生产上这两个值可以直接从 gateway 容器里读, 不必另建应用:

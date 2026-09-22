@@ -138,6 +138,9 @@ def probe_oom_kills(*, runner=subprocess.run, now: float | None = None) -> Findi
             value += f"; 窗外另有 {len(stale)} 条"
         # 进表的数是**窗内**条数, 不含窗外。窗外那些是陈旧记录, 计进去会让表上每天都显示
         # 同一个非零值 —— 那正是「陈旧 OOM 天天报成今天」那个假阳性在趋势表上的形态。
+        # `urgent=True`: 窗内有 OOM 意味着刚刚有进程被内核杀掉, 服务此刻可能是残的(容器
+        # 仍显示 Up, 那是零告警的成因)。同 wss, **只给这条 BAD 不给上面那条 UNKNOWN** ——
+        # 「dmesg 读不到」是环境问题, 一成立就每轮成立, 会变成天天亮着的灯。
         return bad(
             name,
             value=value,
@@ -147,6 +150,7 @@ def probe_oom_kills(*, runner=subprocess.run, now: float | None = None) -> Findi
             num=float(len(recent)),
             num_warn=1.0,
             unit="次",
+            urgent=True,
         )
     if stale:
         # 窗内为 0 才是 OK。窗外那些照旧打出来: 它们是「这台机器有 OOM 史」的证据, 排查
