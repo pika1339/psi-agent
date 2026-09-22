@@ -11,6 +11,10 @@
 
 **并行开发**：改本目录时建议单独一棵 `git worktree` + 独立功能分支；勿与 workspace/后端施工共挂同一分支。约定见仓库根 `WORKTREE.md` 与 `AGENTS.md`（「本地并行开发」）。
 
+### 待办（后面再说 · 尚未排期）
+
+- **上游错误说人话**（与 C 端基线 C33 相邻、但范围更宽）：气泡/失败态里常见 `[Upstream Error]: …` 等技术串（**不含**已落地的登录失效弹窗）。**意向**：按失败类别映射成可读中文（无 key / 上游拒答 / 网络等分列），勿原样甩 upstream 文案。落点待定（spa-v2 展示层映射 vs Gateway/Session 出口改写）。**勿与 C33 混修**：C33（登录态中途失效 → 居中「登录状态失效」+「重新登录」）已落地，见下文「登录」；本条是其余上游失败的人话化。记于 2026-09-22。
+
 ### 交互表面（赶工临时）
 
 **刻意为之 / 赶工临时**：`SHOW_OVERVIEW_AND_TEMPLATES = false`（`haitun-agent/uiSurface.ts`）时：
@@ -234,6 +238,8 @@ Gateway **没有**改云端昵称的 PATCH；账户面板「保存昵称」只�
 | 两种刻意放行 | `available === false`（部署方显式关掉登录，没有门可守，拦下去只会得到一个点不动的表单）；探测抛错（连「是否需要登录」都不知道，且 Gateway 不通本身会由别处报错） |
 | 断网时不放行 | D3 屏在 `mandatory` 下撤掉「暂不登录，继续使用」，只留「重试」，并把文案改成「登录后才能使用」—— 退不出去必须给出原因 |
 
+**会话中途登录失效（C33，刻意为之）**：免费模型走哨兵 `haitun-default`，Gateway 用登录 bearer 换算力。登出 / 其它设备踢下线 / 凭证过期后，对话常以 SSE 正文带回 `[Upstream Error]: … No openai API key provided`（HTTP 仍 200），不是结构化 `type:error`。`services/authExpired.ts` 的 `looksLikeAuthTokenFailure` 识别该形状；`HaiTunAgentWorkspace` 在 `runChatTurn` 成功流与 catch 两条路径探测，且仅在「本机已未登录」或「当前/池内是免费哨兵模型」时弹出居中 `AuthExpiredDialog`（「登录状态失效」+「重新登录」）。点重新登录先 `authLogout` 清掉仍显示已登录的陈旧本机态，再开硬门禁登录窗；气泡改写为中文标题，不 toast 英文原文。判据：`authExpired.test.ts`。与下文「上游错误说人话」待办正交——那条管其余 Upstream 文案，不重复做登录弹窗。
+
 **登录屏上没有任何协议文字。** 演变过三轮：必勾复选框 → 一行被动告知（`.hub-legal-note`）→ 整句去掉。**因为同意动作已前移到安装期** —— 安装向导第一页是必勾的协议页（`.github/inno-setup/haitun.iss`），装过软件的人必然已经同意过，登录窗再说一遍只是噪音。`agreed` / `shakeAgree` state、`onSend` 的前置检查、`LEGAL_TERMS` / `LEGAL_PRIVACY` 常量均已删净。`HubLoginPanel.smoke.test.tsx` 用 `queryByRole(...)).toBeNull()` 反向守着，防止有人「顺手加回来」。
 
 协议正文仍在 `public/terms.html` / `privacy.html`（安装器读的就是这两个，见下），只是 SPA 目前不再链向它们。**若将来要在界面上重新放出协议入口，引用必须走 `import.meta.env.BASE_URL`** —— 本 SPA 挂在 `/spa-v2/` 下，写死绝对路径会打到站点根目录 404（海豚图标曾这么碎过，`DOLPHIN` 常量就是为此）。
@@ -246,9 +252,9 @@ Gateway **没有**改云端昵称的 PATCH；账户面板「保存昵称」只�
 src/
   App.tsx                 # 工作区门禁 → 工作台
   components/WorkspaceGate.tsx
-  services/               # api / sse / chatStream / sessionBridge / bootstrapAi / turnProgress / reasoningDisplay / clipboardFiles / composerFileDrop / authFlow / useAuthAccount / accountDisplayName / userProfile
+  services/               # api / sse / chatStream / sessionBridge / bootstrapAi / authExpired / turnProgress / reasoningDisplay / clipboardFiles / composerFileDrop / authFlow / useAuthAccount / accountDisplayName / userProfile
   haitun-agent/           # 任务 UI（设计包）；focus-chat-thread 含「已思考」展开
-  components/user-hub/    # 用户中心（账号/登录 / 大模型 / 设置；本地「我的资料」已删）
+  components/user-hub/    # 用户中心（账号/登录 / 大模型 / 设置；AuthExpiredDialog = C33 中途失效）
   styles/globals.css
 public/                   # 不打包, 由站点根提供; 引用一律走 import.meta.env.BASE_URL
   haitun-dolphin.png

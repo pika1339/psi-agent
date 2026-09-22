@@ -58,6 +58,7 @@ import {
   fetchTodoSegment,
   generateSummary,
   getAuthStatus,
+  authLogout,
   listAis,
   listSessions,
   listSummaries,
@@ -73,10 +74,13 @@ import {
   ensureDefaultAi,
   ensureSessionAi,
   hydrateAiForSessions,
+  isPlaceholderAi,
   pickPreferredAi,
   readStoredAiId,
   writeStoredAiId,
 } from "../services/bootstrapAi";
+import { looksLikeAuthTokenFailure } from "../services/authExpired";
+import { notifyAuthChanged } from "../services/useAuthAccount";
 import { chatFileToFile, filesToChatFiles } from "../services/chatFiles";
 import {
   bringTaskToFront,
@@ -148,6 +152,7 @@ import SurveyPopup from "./SurveyPopup";
 
 import { NewTaskWorkspace, TemplateLibrary } from "./secondary-views";
 import UserHub from "../components/user-hub/UserHub";
+import AuthExpiredDialog from "../components/user-hub/AuthExpiredDialog";
 import FirstRunGuide from "../components/FirstRunGuide";
 import FirstRunSpotlight from "../components/FirstRunSpotlight";
 import TaskStatusTip from "../components/TaskStatusTip";
@@ -691,6 +696,55 @@ export default function HaiTunAgentWorkspace({
    * "checking" 期间压住首屏引导与模型池自动弹窗，避免两层弹窗叠在一起。
    */
   const [authGate, setAuthGate] = useState<"checking" | "open" | "passed">("checking");
+  /** C33: mid-session free-model auth failure → centered re-login reminder. */
+  const [authExpiredOpen, setAuthExpiredOpen] = useState(false);
+  const authExpiredPromptingRef = useRef(false);
+
+  const promptAuthExpiredIfNeeded = useCallback(async (message: string, currentAiId: string | null) => {
+    if (!looksLikeAuthTokenFailure(message)) return false;
+    if (authExpiredOpen || authExpiredPromptingRef.current) return true;
+    authExpiredPromptingRef.current = true;
+    try {
+      let shouldOpen = false;
+      try {
+        const st = await getAuthStatus();
+        if (st.available && !st.loggedIn) shouldOpen = true;
+      } catch {
+        // status probe failed — fall through to free-model check
+      }
+      if (!shouldOpen) {
+        try {
+          const ais = await listAis();
+          const current = (currentAiId && ais.find((a) => a.id === currentAiId))
+            || ais.find((a) => isPlaceholderAi(a))
+            || null;
+          if (current && isPlaceholderAi(current)) shouldOpen = true;
+        } catch {
+          // pool unreachable — still open if text clearly says no API key
+          shouldOpen = looksLikeAuthTokenFailure(message);
+        }
+      }
+      if (shouldOpen) setAuthExpiredOpen(true);
+      return shouldOpen;
+    } finally {
+      authExpiredPromptingRef.current = false;
+    }
+  }, [authExpiredOpen]);
+
+  const handleAuthExpiredRelogin = useCallback(async () => {
+    setAuthExpiredOpen(false);
+    // Clear stale local credential so HubLoginPanel shows the login form
+    // (not the account panel) even when /auth/status still said loggedIn.
+    try {
+      await authLogout();
+    } catch {
+      // best-effort — still open the gate
+    }
+    notifyAuthChanged();
+    setAuthGate("open");
+    setLoginGateNonce((n) => n + 1);
+  }, []);
+
   const recheckAuthGate = useCallback(async () => {
     try {
       const st = await getAuthStatus();
@@ -1301,6 +1355,7 @@ export default function HaiTunAgentWorkspace({
     let turnOk = false;
     let wasAborted = false;
     let assistantFull = "";
+    let authExpiredTurn = false;
     // Enter advance phase for this turn (layer-1); todos refine the middle label.
     setTasks((current) =>
       current.map((task) =>
@@ -1390,7 +1445,32 @@ export default function HaiTunAgentWorkspace({
       turnOk = true;
       assistantFull = settleContentSegments(turnContentSegByCardRef.current[cardId]).finalText || full.trim();
       const hasBlob = blobs.length > 0;
-      if (!full.trim() && !hasBlob && !assistantFull) {
+      // C33: Upstream auth failure often arrives as assistant text (HTTP 200 SSE),
+      // not as a thrown error — detect and open re-login modal.
+      const authProbeText = assistantFull || full.trim();
+      if (authProbeText && await promptAuthExpiredIfNeeded(authProbeText, aiId)) {
+        turnOk = false;
+        authExpiredTurn = true;
+        turnContentSegByCardRef.current[cardId] = contentSegmentsStart();
+        setMessages((current) => {
+          const list = [...(current[cardId] ?? [])];
+          const last = list[list.length - 1];
+          if (last?.role === "agent") {
+            list[list.length - 1] = {
+              ...last,
+              text: t("auth.expiredTitle"),
+              interimText: undefined,
+            };
+          }
+          for (let i = list.length - 1; i >= 0; i--) {
+            if (list[i]?.role === "user") {
+              list[i] = { ...list[i]!, failed: true, failedReason: "error" };
+              break;
+            }
+          }
+          return { ...current, [cardId]: list };
+        });
+      } else if (!full.trim() && !hasBlob && !assistantFull) {
         // No displayable reply — mark orphan user failed (same as history normalize).
         // Stop/abort must never land here (handled above); this is network/empty completion only.
         turnOk = false;
@@ -1435,6 +1515,11 @@ export default function HaiTunAgentWorkspace({
       }
       if (epoch !== streamEpochByCardRef.current[cardId]) return;
       const err = e instanceof Error ? e.message : String(e);
+      const authExpired = await promptAuthExpiredIfNeeded(err, aiId);
+      if (authExpired) {
+        authExpiredTurn = true;
+        turnContentSegByCardRef.current[cardId] = contentSegmentsStart();
+      }
       setMessages((current) => {
         const list = [...(current[cardId] ?? [])];
         for (let i = list.length - 1; i >= 0; i--) {
@@ -1444,17 +1529,19 @@ export default function HaiTunAgentWorkspace({
           }
         }
         const last = list[list.length - 1];
+        const display = authExpired ? t("auth.expiredTitle") : `${t("app.errorPrefix")}${err}`;
         if (last?.role === "agent") {
           list[list.length - 1] = {
             ...last,
-            text: last.text || `${t("app.errorPrefix")}${err}`,
+            text: authExpired ? display : (last.text || display),
+            interimText: undefined,
           };
         } else {
-          list.push({ role: "agent", text: `${t("app.errorPrefix")}${err}` });
+          list.push({ role: "agent", text: display });
         }
         return { ...current, [cardId]: list };
       });
-      showToast(err);
+      if (!authExpired) showToast(err);
     } finally {
       if (epoch === streamEpochByCardRef.current[cardId]) {
         const reasoningRaw = (turnReasoningByCardRef.current[cardId] ?? "").trim();
@@ -1470,12 +1557,16 @@ export default function HaiTunAgentWorkspace({
             if (last?.role === "agent") {
               list[list.length - 1] = {
                 ...last,
-                text: finalText || last.text,
+                // Auth-expired path already wrote a human title; do not let Upstream Error
+                // finalText overwrite it in this finally settle.
+                text: authExpiredTurn
+                  ? t("auth.expiredTitle")
+                  : (finalText || last.text),
                 interimText: undefined,
                 createdAt: settledAt,
                 thinkingMs,
-                ...(reasoningRaw ? { reasoning: reasoningRaw } : {}),
-                ...(tools.length ? { tools } : {}),
+                ...(reasoningRaw && !authExpiredTurn ? { reasoning: reasoningRaw } : {}),
+                ...(tools.length && !authExpiredTurn ? { tools } : {}),
               };
               return { ...current, [cardId]: list };
             }
@@ -2902,6 +2993,12 @@ export default function HaiTunAgentWorkspace({
           }}
         />
       ) : null}
+      <AuthExpiredDialog
+        show={authExpiredOpen}
+        onRelogin={() => {
+          void handleAuthExpiredRelogin();
+        }}
+      />
     </div>
   );
 }
