@@ -1,0 +1,24 @@
+{
+  "version": "v1-2026-09-01",
+  "effective_date": "2026-09-01",
+  "currency": "CNY",
+  "unit_tokens": 1000000,
+  "source": "DeepSeek 开放平台公开价目, 抄录于 2026-09-18。未与账单对过。",
+  "note": "prompt 单价乘的是未命中缓存的那部分 (prompt_tokens - cached_tokens); cached 单价单独乘 cached_tokens。reasoning_in_completion=true 时 reasoning 单价不参与乘法, 因为 reasoning_tokens 是 completion_tokens 的明细项而非附加项。",
+  "models": {
+    "deepseek-chat": {
+      "prompt": 2.0,
+      "cached": 0.5,
+      "completion": 8.0,
+      "reasoning": 8.0,
+      "reasoning_in_completion": true
+    },
+    "deepseek-reasoner": {
+      "prompt": 4.0,
+      "cached": 1.0,
+      "completion": 16.0,
+      "reasoning": 16.0,
+      "reasoning_in_completion": true
+    }
+  }
+}

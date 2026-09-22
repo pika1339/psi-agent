@@ -1,0 +1,80 @@
+# HaiTun 监控配置样例 —— 复制到宿主 `/etc/haitun/monitoring.conf` 并填真实值。
+#
+#     install -D -m 0600 monitoring.conf.example /etc/haitun/monitoring.conf
+#
+# **真实文件不得入库。** `webhook_url` 是凭据: 拿到它就能往运维群发任意消息, 所以它只存在
+# 于宿主上, 仓库里只有这份样例。0600 权限不是形式 —— cron 以 root 跑, 别的用户没有理由读它。
+#
+# 读取顺序: 环境变量 `HAITUN_MONITOR_<KEY>` 优先, 否则本文件。生产实际走本文件, 因为
+# cron 的环境里没有登录 shell 的 profile。
+
+# 飞书**自定义机器人** webhook URL。
+# 刻意不用 app token: app token 走 OAuth, 而 OAuth 回调正是坏过的那条路 —— 监控不能依赖
+# 它监控的东西。自定义机器人是一次裸 HTTP POST, 不依赖本机任何服务。
+webhook_url=https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE-ME
+
+# 要探的 vhost, 逗号分隔, `域名:期望状态码`(省略状态码则默认 200)。
+# 留空则第 1 类整类报「未测到」而不是「全部健康」—— 配置缺失不是健康。
+vhosts=example.invalid:200
+
+# 目标机公网 IP。**必填**, 否则 vhost 与 TLS 探针报「未测到」而不是走系统 DNS。
+#
+# 为什么不让它走 DNS: 境内 A / 境外 B 两台跑过同一套栈, DNS 可能把探针导到另一台上 ——
+# 那种情况下「绿」证明不了这台机器活着。`curl --resolve` 定向到这个 IP 才是同一台。
+#
+# 另: 探针用的是 `--resolve` 而**不是** `-H Host`。后者只改 HTTP 头、SNI 仍是裸 IP, 服务端
+# 在 TLS 层就 alert, curl 报 HTTP=000 —— 而 000 与真的服务挂了不可区分, 会假报一次宕机。
+public_ip=
+
+# 容器名, 逗号分隔。**容器名不是 compose 的 service 名**(service 是 gateway /
+# private-luolin / private-chengxx; 容器是 psi-agent-*)。传错不报错, 只是什么都不做。
+containers=psi-agent-gateway,psi-agent-luolin,psi-agent-chengxx
+
+# 会自己建飞书长连接的容器 —— **只有 gateway 一个**, 别照抄上面那行。
+#
+# 私有容器跑 `psi-agent run` + `channel_socket`, 设计上压根不连飞书: 消息由主容器经
+# PSI_FEISHU_EXTERNAL_SESSIONS 转发进来, 回复顺原路出去。2026-09-21 实测它们 netns 里
+# established 总数是 0(不是只缺 443, 是一条都没有), 而 gateway 那份是 14 条。
+#
+# 把三个容器都填进来, 「>= 1 每容器」就永远不可能满足 —— 两个健康容器天天被报异常, 而一条
+# 恒定为真的告警等于没有告警。留空则整项报「未测到」, 不会报成「全部正常」。
+wss_containers=psi-agent-gateway
+
+# OAuth 回调路径 —— 这是唯一一条**入站**必经路径。出站(定时任务、发飞书卡片)全绿不证明
+# 它活着, 所以它单独一条探针。
+oauth_callback_path=/oauth/callback
+
+# oauth-proxy 在宿主上的监听端口。**8090 是 oauth-proxy 不是 gateway** —— gateway 在容器内
+# 听 8080 且不对外暴露。当成 gateway 直连会得出反向的错误根因。
+oauth_proxy_port=8090
+
+# 单次 curl 超时秒数。即时档 5 分钟一轮, 总耗时要远小于一个周期。
+timeout_seconds=10
+
+# ───────────────── 趋势表(多维表格) ─────────────────
+#
+# 日报的**主载体是这张表**, 不是消息: 每天一条全量消息的结局是被无视, 然后被静音 —— 静音
+# 之后这套监控等于不存在。所以数字一天一行进表, 消息只在有异常或有观测缺口时发。
+#
+# 这四项全空则不写表, 只发消息。缺一项也不写, 并在 cron 日志里说缺哪一项 —— 静默跳过会让
+# 「表里一直没有新行」查不到原因。
+#
+# 与 webhook 的分工: 写表要**应用身份**(tenant access token), 而应用身份走的是 open API,
+# 不是 OAuth 回调那条坏过的路。消息仍走自定义机器人, 所以哪怕应用凭据整个失效, 告警照发。
+
+# 飞书自建应用凭据。**app_secret 是凭据**, 与 webhook_url 同级: 只存在于这个 0600 文件里。
+# 生产上这两个值可以直接从 gateway 容器里读, 不必另建应用:
+#     docker exec psi-agent-gateway printenv PSI_FEISHU_APP_ID PSI_FEISHU_APP_SECRET
+feishu_app_id=
+feishu_app_secret=
+
+# 多维表格坐标。从表的 URL 里取: .../base/<bitable_app_token>?table=<bitable_table_id>
+#
+# 表和列**不用手建**: 填好坐标后 run.py 每次跑都会把缺的列补齐(已存在的列一个都不碰)。
+# 要先有一张空的多维表格, 且该应用有它的编辑权限。
+bitable_app_token=
+bitable_table_id=
+
+# 表的可点链接, 附在告警消息末尾。空则消息里不带链接 —— 那样收到告警的人得先去飞书里找
+# 那张表叫什么。
+bitable_url=

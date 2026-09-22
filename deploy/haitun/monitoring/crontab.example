@@ -1,0 +1,35 @@
+# HaiTun 生产监控 crontab 样例 —— **本文件不自动安装**, 由负责人自己登机器装。
+#
+#     crontab -l > /tmp/cur && cat crontab.example >> /tmp/cur && crontab /tmp/cur
+#
+# ## 装之前先核时区
+#
+# 下面的时刻是**宿主本地时间**。容器里那套时区只由 compose 的 `TZ=Asia/Shanghai` 撑着,
+# 容器内 `/etc/localtime` **恒为 UTC** —— 拿它当判据会得出「时区是 UTC」这个假阴性, 然后
+# 把时刻调偏 8 小时。宿主是另一回事, 所以:
+#
+#     date                      # 确认宿主时区就是你以为的那个
+#     crontab -l | head -3      # 确认 crontab 里没有覆盖 TZ 的行
+#
+# cron 的环境里**没有登录 shell 的 profile**, 因此 webhook URL 走宿主配置文件而不是
+# 环境变量(见 monitoring.conf.example)。PATH 也要显式给, 否则 docker/curl 可能找不到。
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# 失败通知本身走 webhook(见 cron-wrap.sh), 这里的 MAILTO 是最后一层兜底 —— webhook 也
+# 不可达时, stderr 至少进本机邮件。留空则连这层都没有。
+MAILTO=root
+
+# ── 日报: 每天一次, 全量统计 ────────────────────────────────────────────────
+# 8:57 而非 9:00: 整点是所有人的默认值, 扎堆会让上游限流命中我们。分钟位刻意不是 0/30。
+57 8 * * * /srv/haitun/monitoring/cron-wrap.sh daily
+
+# ── 即时档: 5 分钟一轮, 仅公网可达性 + OOM ──────────────────────────────────
+# 为什么不能只有日报: 502 那次若只靠日报, 等于等 24 小时。
+# **即时档只在发现异常时出声** —— 5 分钟一条会被无视继而被静音。存活由下面那条心跳保证。
+*/5 * * * * /srv/haitun/monitoring/cron-wrap.sh fast
+
+# ── 即时档心跳: 每天一次, 报过去 24 小时跑了多少轮 ──────────────────────────
+# 没有这条, 「即时档自己死了」与「一直没异常」在群里长得一模一样。
+# 报轮数而不是只说「存活」: 轮数少于预期(约 288)才看得出 cron 漏跑。
+# 9:03 —— 与日报错开几分钟, 两条一起到会被当成一条略过。
+3 9 * * * /srv/haitun/monitoring/cron-wrap.sh heartbeat

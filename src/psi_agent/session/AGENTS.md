@@ -856,3 +856,49 @@ async def compact_history(
 ### peek_pending / clear_pending 安全机制
 
 `Conversation.peek_pending()` 返回 pending chunks 的副本但**不清空** buffer——调用方在 yield 全部成功后显式调用 `clear_pending()`。这保证 channel 断开时 pending schedule chunks 不会永久丢失，下次请求会重新 push。
+
+## 埋点采集点（`psi_agent.metrics`）
+
+方案与字段语义见 `docs/plans/2026-09-18-可观测性埋点-metrics-log-成本.md`；这里只写代码级事实——哪个
+函数、为什么放在那个位置。
+
+### `event="turn"` 写在 `run()` 的 `finally` 里，不在别处
+
+`SessionAgent.run()` 的 `finally`（`end_turn()` 之后）是**唯一**每条退出路径都恰好经过一次的点。其余
+候选位置全部错：
+
+- **流循环之后** —— 每个 model round 各跑一次，多轮工具回合会写出多行。
+- **紧挨每个 `_finish()`** —— 取消与异常路径走 `except BaseException`，一个 `_finish` 都到不了。
+- **包装函数里** —— 调用方可以绕过。
+
+尤其注意 **tool_calls 分支 `break` 出流循环**（同 `request_assembly` 那条校准所在位置的理由）：留在
+循环底部的代码在**最花上下文的回合上永远不会跑**。所以逐 delta 要读的三样（`ttft_s`/`req_bytes`、
+usage、error chunk 标记）都取在循环体内已有校准那一处，N/M 取在 `tools_exposed=... of ...` 那条 INFO
+旁边。
+
+写入用 `anyio.CancelScope(shield=True)` 包住：不 shield 的 `await` 会在取消路径上被吞掉，而取消的回合
+恰好是最需要留痕的一类。
+
+### 四值 `outcome` 不是 `AgentStopCause` 的改名
+
+`METRIC_OUTCOME_*` 由**异常类型 + 是否出现 error chunk** 推出，与 `stop_cause` 并列成两个字段。原因：
+取消和超时从来不产生 stop cause（它们走 `except BaseException` 离开），`AgentStopCause` 的四个值
+（`model_completed`/`model_stopped`/`agent_turn_limit`/`invalid_model_stream`）对不上四值 outcome。
+
+### token 字段「缺失」与「真的是 0」必须分开
+
+`AiClient._opt_int()` 缺失返回 `None`，与 `_as_int()`（缺失返回 0）**刻意分开**：后者的 0 语义是给预算
+校准用的（偏低 = 欠装 = 安全），而成本汇总里 0 会让当日花费被静默低估——观测缺口伪装成健康。两者都显式
+拒 `bool`（`int` 子类，JSON `true` 会变成 1 token）。`ModelUsage.reported` 回答的是「上游到底报没报
+usage」，与「某个字段有没有值」不是同一个问题。
+
+`reasoning_tokens` 取自 `completion_tokens_details.reasoning_tokens`（schema 已确认存在）。线上某个
+provider 实际是否回填该项**未经真实上游验证**，因此缺失一律 `None`。
+
+### `event="compaction"` 单独一行
+
+压缩是**尾部工作**：`_request_compaction()` 只记录，真正执行由 `turn_lock` 在锁释放后
+`drain_pending_compaction()` → `_maybe_compact()`。所以 compaction 行的时间戳**晚于**触发它的 turn
+行，这是对的，不要"修"成同一时刻。写入点在 `agent.py._maybe_compact()` 的 `finally`，位置在
+`compaction_fn is None` 与冷却拒绝两条 `return` **之后**——那两条不发生模型调用，若也写行会读成"压缩很
+便宜"。usage 由 `_sum_usage()` 跨多次摘要调用累加（`None + 5 = 5`，`None + None = None`）。

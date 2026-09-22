@@ -1,0 +1,24 @@
+{
+  "version": "v2-2026-09-15",
+  "effective_date": "2026-09-15",
+  "currency": "CNY",
+  "unit_tokens": 1000000,
+  "source": "同 v1 来源, 2026-09-15 调价后重抄。未与账单对过。",
+  "note": "存在两版的意义不只是记录调价: 它让「换一版单价表 -> 同一批 jsonl 算出不同金额且报告里版本号随之变」这条阴性判据有真实的第二份文件可换, 而不是靠测试里造一个临时字典。",
+  "models": {
+    "deepseek-chat": {
+      "prompt": 2.4,
+      "cached": 0.6,
+      "completion": 9.6,
+      "reasoning": 9.6,
+      "reasoning_in_completion": true
+    },
+    "deepseek-reasoner": {
+      "prompt": 4.8,
+      "cached": 1.2,
+      "completion": 19.2,
+      "reasoning": 19.2,
+      "reasoning_in_completion": true
+    }
+  }
+}

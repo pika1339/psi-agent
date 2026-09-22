@@ -14,6 +14,7 @@ import anyio
 from aiohttp import web
 from loguru import logger
 
+from psi_agent import metrics
 from psi_agent._card_markers import (
     CARD_ACTION_BATCH_PATTERN,
     CARD_ACTION_TAG,
@@ -56,6 +57,7 @@ from psi_agent.session.protocol import (
     AgentRunResult,
     AgentRunStatus,
     AgentStopCause,
+    ModelUsage,
 )
 from psi_agent.session.request_assembly import RequestAssembler
 from psi_agent.session.runtime_context import runtime_scope
@@ -185,6 +187,117 @@ def _livelock_suspects(
         if churn > _LIVELOCK_CANCEL_CHURN:
             suspects[idx] = churn
     return suspects
+
+
+METRIC_OUTCOME_NORMAL = "normal"
+METRIC_OUTCOME_TIMEOUT = "timeout"
+METRIC_OUTCOME_CANCELLED = "cancelled"
+METRIC_OUTCOME_ERROR = "error"
+"""The four end-of-turn causes the cost report distinguishes (W#5).
+
+**Not** a rename of ``AgentStopCause``.  That enum has four values too, but they
+answer a different question and only one of them — ``MODEL_COMPLETED`` — is even
+about success; the other three (``MODEL_STOPPED`` / ``AGENT_TURN_LIMIT`` /
+``INVALID_MODEL_STREAM``) are all *normal returns of the runtime* that happen to
+carry an unfinished answer.  Meanwhile cancellation and timeout never produce a
+stop cause at all: they leave ``run()`` as exceptions through the
+``except BaseException`` path, so a mapping keyed only on the enum would record
+every cancelled turn as whatever the last round happened to set.
+
+The mapping, therefore:
+
+- exception is ``CancelledError`` (or anyio's cancelled exception) → ``cancelled``
+- exception is ``TimeoutError`` → ``timeout``
+- any other exception, or an error ``finish_reason`` from the stream → ``error``
+- returned normally → ``normal``, with the runtime's ``stop_cause`` recorded
+  *beside* it rather than folded into it, so "completed" and "hit the round
+  ceiling" stay separable without inventing a fifth outcome value.
+"""
+
+
+def _usage_fields(usage: ModelUsage | None) -> dict[str, object]:
+    """Cost inputs as metric fields, with **missing kept distinct from zero** (W#6).
+
+    ``usage is None`` means no upstream ``usage`` object arrived, so every count goes
+    out as JSON ``null`` alongside ``usage_reported=False``.  Writing 0 instead would
+    assert the turn was free, and the cost report has no way to tell that apart from
+    a genuinely free turn — the day's total would come out *lower* exactly when the
+    upstream was least healthy.
+
+    One function for both ``turn`` and ``compaction`` rows so the two cannot drift
+    into different spellings of the same field, which would make a summed report
+    silently skip one of them.
+    """
+    if usage is None:
+        return {
+            "usage_reported": False,
+            "model": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+            "cached_tokens": None,
+            "reasoning_tokens": None,
+        }
+    return {
+        "usage_reported": usage.reported,
+        "model": usage.model,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "cached_tokens": usage.cached_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+    }
+
+
+def _sum_usage(left: ModelUsage | None, right: ModelUsage) -> ModelUsage:
+    """Add two usage reports, keeping "not measured" from contaminating the sum.
+
+    Used where one logical unit of work makes more than one model call (compaction
+    retries).  ``None + 5`` is 5, not ``None``: the one call that did report is real
+    spend and dropping it would under-report.  ``None + None`` stays ``None`` —
+    nothing was measured, and a 0 there would be the very claim W#6 forbids.
+    """
+
+    def _add(a: int | None, b: int | None) -> int | None:
+        if a is None:
+            return b
+        if b is None:
+            return a
+        return a + b
+
+    if left is None:
+        return right
+    return ModelUsage(
+        reported=left.reported or right.reported,
+        # Last model wins: a differing second id means the retry was served by
+        # another model, and that is the one whose price applies to the summary
+        # actually kept.
+        model=right.model or left.model,
+        prompt_tokens=_add(left.prompt_tokens, right.prompt_tokens),
+        completion_tokens=_add(left.completion_tokens, right.completion_tokens),
+        total_tokens=_add(left.total_tokens, right.total_tokens),
+        cached_tokens=_add(left.cached_tokens, right.cached_tokens),
+        reasoning_tokens=_add(left.reasoning_tokens, right.reasoning_tokens),
+    )
+
+
+def _metric_outcome(exc: BaseException | None, *, had_error_chunk: bool) -> str:
+    """Map how a turn ended onto the four values above.
+
+    ``had_error_chunk`` covers the case with no exception to inspect: a non-200 from
+    the AI layer arrives as a ``finish_reason=error`` delta and the turn returns
+    normally, which would otherwise be indistinguishable from a real answer.
+    """
+    if exc is not None:
+        # ``anyio.get_cancelled_exc_class()`` rather than ``asyncio.CancelledError``
+        # directly: on a trio backend they are different classes, and this must not
+        # quietly reclassify every cancellation as an error on one of the two.
+        if isinstance(exc, anyio.get_cancelled_exc_class()):
+            return METRIC_OUTCOME_CANCELLED
+        if isinstance(exc, TimeoutError):
+            return METRIC_OUTCOME_TIMEOUT
+        return METRIC_OUTCOME_ERROR
+    return METRIC_OUTCOME_ERROR if had_error_chunk else METRIC_OUTCOME_NORMAL
 
 
 RECENT_TURNS_MARKER = "\n[Recent turns]\n"
@@ -361,6 +474,12 @@ class SessionAgent:
         # summarizing the same conversation at once.
         self._pending_compaction: tuple[int, int] | None = None
         self._compaction_in_flight = False
+        # Turn ordinal for the metrics row.  Per-session and in-memory: it orders
+        # this process's turns for a reader who has the jsonl, and is deliberately
+        # not persisted — a Feishu session is long-lived but the number's only job
+        # is sequencing within a run, so restoring it would mean a second source of
+        # truth for something no one reasons about across restarts.
+        self._turn_seq = 0
         # One per session: it carries the calibrated chars/token ratio and the
         # set of rows already elided, both of which must persist across turns
         # for hysteresis to mean anything.
@@ -881,6 +1000,39 @@ class SessionAgent:
                 }
                 logger.debug(f"History now has {len(self._conversation.messages)} messages")
 
+                # Metrics state for this turn's single row.  Declared out here, and
+                # accumulated as the rounds go, because the row is written in the
+                # ``finally`` below — see there for why that is the only position
+                # that yields exactly one row per turn.
+                self._turn_seq += 1
+                _m_turn_index = self._turn_seq
+                _m_t0 = time.monotonic()
+                _m_ttft_s: float | None = None
+                _m_req_bytes: int | None = None
+                _m_tools_exposed: int | None = None
+                _m_tools_total: int | None = None
+                _m_tool_calls = 0
+                _m_usage: ModelUsage | None = None
+                _m_had_error_chunk = False
+                _m_stop_cause: AgentStopCause | None = None
+                _m_exc: BaseException | None = None
+
+                def _record_stop_cause(
+                    status: AgentRunStatus,
+                    stop_cause: AgentStopCause,
+                    model_finish_reason: str | None,
+                    model_turns_: int,
+                ) -> None:
+                    """Tee ``_finish``'s stop cause into the metrics row.
+
+                    Wrapping rather than reading ``_result_sink.result``: direct
+                    callers of ``run()`` pass no sink at all, and the metrics row
+                    must not depend on whether the caller wanted a result object.
+                    """
+                    nonlocal _m_stop_cause
+                    _m_stop_cause = stop_cause
+                    _finish(status, stop_cause, model_finish_reason, model_turns_)
+
                 try:
                     model_turns = 0
                     # One tracker per turn, so a refusal earned by this question is
@@ -909,6 +1061,13 @@ class SessionAgent:
                         logger.info(
                             f"tools_exposed={len(tool_defs)} of {len(_all_tools)} tier={self._exposure_tier.value}"
                         )
+                        # **Both** numbers, never just the first (W#3).  Production
+                        # read ``tools_exposed=232 of 232`` as "narrowing is on" for
+                        # weeks while every layer was in fact undeclared and the full
+                        # surface shipped at 289774 chars of schema per turn.  One
+                        # number cannot express that; the pair can.
+                        _m_tools_exposed = len(tool_defs)
+                        _m_tools_total = len(_all_tools)
 
                         # Logged next to the prompt breakdown, not inside it: these
                         # schemas are their own request field, so they are a
@@ -959,6 +1118,18 @@ class SessionAgent:
                                     yield AgentChunk(reasoning=delta.reasoning, kind=r_kind)
                                     accumulated_reasoning += delta.reasoning
 
+                                # Same reasoning as the calibration below, same
+                                # position: read off each delta as it passes, because
+                                # the tool-calls branch never reaches the bottom of
+                                # this loop.
+                                if delta.ttft_s is not None and _m_ttft_s is None:
+                                    _m_ttft_s = delta.ttft_s
+                                    _m_req_bytes = delta.req_bytes
+                                if delta.usage is not None:
+                                    _m_usage = delta.usage
+                                if delta.finish_reason == FINISH_REASON_ERROR:
+                                    _m_had_error_chunk = True
+
                                 if delta.usage_prompt_tokens:
                                     # Calibrate as soon as the number arrives, not at
                                     # the end of the round: the tool-calls branch
@@ -1005,6 +1176,12 @@ class SessionAgent:
                                 if finish_reason == FINISH_REASON_TOOL_CALLS:
                                     logger.info("AI requested tool calls, processing...")
                                     ordered_calls = [accumulated_tool_calls[i] for i in sorted(accumulated_tool_calls)]
+                                    # Counted per *call*, summed across rounds: one
+                                    # round can carry several, and the turn row is
+                                    # per turn.  Not a per-tool breakdown — the tool
+                                    # layer is deliberately out of scope (95 tools,
+                                    # unbounded row width).
+                                    _m_tool_calls += len(ordered_calls)
 
                                     assistant_msg: dict[str, Any] = {"role": "assistant"}
                                     if accumulated_content:
@@ -1245,7 +1422,7 @@ class SessionAgent:
                                 # and must not be charged to the next message's wait.
                                 # ``turn_lock`` runs it once the lock is released.
                                 self._request_compaction(_compaction_prompt_tokens, _compaction_threshold)
-                            _finish(
+                            _record_stop_cause(
                                 AgentRunStatus.COMPLETED,
                                 AgentStopCause.MODEL_COMPLETED,
                                 finish_reason,
@@ -1270,7 +1447,7 @@ class SessionAgent:
                                     assistant_msg["reasoning"] = accumulated_reasoning
                                 self._conversation.add(with_kind(_with_thinking_ms(assistant_msg), turn_response_kind))
                             await self._conversation.commit()
-                            _finish(
+                            _record_stop_cause(
                                 AgentRunStatus.INCOMPLETE,
                                 AgentStopCause.MODEL_STOPPED
                                 if finish_reason is not None
@@ -1302,19 +1479,21 @@ class SessionAgent:
                         yield AgentChunk(content=notice)
                         # Loop ran out of rounds; the last model turn asked for yet
                         # more tools, so its finish reason is typically "tool_calls".
-                        _finish(
+                        _record_stop_cause(
                             AgentRunStatus.INCOMPLETE,
                             AgentStopCause.AGENT_TURN_LIMIT,
                             finish_reason,
                             model_turns,
                         )
 
-                except AgentError:
+                except AgentError as exc:
+                    _m_exc = exc
                     raise
-                except BaseException:
+                except BaseException as exc:
                     # Cancel / disconnect / generator aclose: drop the early-
                     # committed user (and any mid-turn tool rows). AgentError
                     # keeps the user — that is the crash-retry baseline.
+                    _m_exc = exc
                     await self._abandon_incomplete_turn(turn_start)
                     raise
                 finally:
@@ -1325,6 +1504,45 @@ class SessionAgent:
                     # elision range at its own index, and the symptom is a budget
                     # that quietly stops being enforceable rather than an error.
                     self._request_assembler.end_turn()
+
+                    # **Exactly one turn row, written here and nowhere else.**
+                    #
+                    # This ``finally`` is the only position that satisfies both
+                    # halves of W#1.  Every other candidate fails one of them:
+                    #
+                    # - after the stream loop: the tool-calls branch ``break``s out
+                    #   of it and loops again, so the row would be written once per
+                    #   model round — several per turn on exactly the turns that
+                    #   cost the most.
+                    # - beside each ``_finish``: there are three of them plus two
+                    #   ``return``s, and the cancel/error paths reach none of them,
+                    #   so cancelled turns would vanish from the record entirely.
+                    # - in ``run_streamed``/``handle_request``: those are wrappers
+                    #   some callers skip, and ``run()`` is what a turn *is*.
+                    #
+                    # Shielded: on the cancellation path this ``await`` is itself
+                    # inside a cancelled scope, and an unshielded one would be
+                    # delivered a cancellation before the row was written — the
+                    # cancelled turns would be precisely the ones missing, which is
+                    # the shape of an observability gap that reads as health.
+                    with anyio.CancelScope(shield=True):
+                        await metrics.record(
+                            "turn",
+                            session_id=self._conversation.session_id,
+                            turn_index=_m_turn_index,
+                            kind=turn_response_kind,
+                            req_bytes=_m_req_bytes,
+                            tools_exposed=_m_tools_exposed,
+                            tools_total=_m_tools_total,
+                            ttft_s=_m_ttft_s,
+                            duration_s=time.monotonic() - _m_t0,
+                            model_rounds=model_turns,
+                            tool_calls=_m_tool_calls,
+                            compaction_triggered=self._pending_compaction is not None,
+                            outcome=_metric_outcome(_m_exc, had_error_chunk=_m_had_error_chunk),
+                            stop_cause=str(_m_stop_cause) if _m_stop_cause is not None else None,
+                            **_usage_fields(_m_usage),
+                        )
 
     async def _await_tool_batch(
         self,
@@ -1499,13 +1717,24 @@ class SessionAgent:
         if not self._compaction_cooldown_elapsed(prompt_tokens, threshold):
             return
 
+        # Compaction's own cost, accumulated across however many LLM calls the
+        # workspace's ``compact_history`` makes (the default makes one; the hijack
+        # retry above makes two).  Summed rather than last-wins: a retried
+        # compaction really did pay twice, and recording only the second call would
+        # under-report exactly the passes that went wrong.
+        comp_t0 = time.monotonic()
+        comp_usage: ModelUsage | None = None
+
         async def complete_fn(messages: list[dict[str, Any]]) -> str:
+            nonlocal comp_usage
             body: dict[str, Any] = {"messages": messages, "stream": True}
             parts: list[str] = []
             async with aclosing(self._ai_client.stream(body)) as stream:
                 async for delta in stream:
                     if delta.content:
                         parts.append(delta.content)
+                    if delta.usage is not None:
+                        comp_usage = _sum_usage(comp_usage, delta.usage)
                     if delta.finish_reason == FINISH_REASON_ERROR:
                         raise AgentError(delta.content or "Compaction AI call failed")
             return "".join(parts)
@@ -1517,10 +1746,12 @@ class SessionAgent:
         snapshot = list(self._conversation.messages)
         covers = len(snapshot)
 
+        comp_outcome = METRIC_OUTCOME_NORMAL
         try:
             summary = await compaction_fn(snapshot, complete_fn)
             if not summary:
                 logger.debug("Compaction returned empty summary, skipping")
+                comp_outcome = METRIC_OUTCOME_ERROR
                 return
             source_chars = _conversation_chars(snapshot)
             if _summary_looks_hijacked(summary, source_chars):
@@ -1531,6 +1762,7 @@ class SessionAgent:
                     # model's answer to the transcript, permanently.  Skipping
                     # leaves history un-compacted, which the next turn retries.
                     logger.error("Compaction summary still looks hijacked after retry, not writing it")
+                    comp_outcome = METRIC_OUTCOME_ERROR
                     return
             logger.info(f"Compaction summary generated ({len(summary)} chars)")
 
@@ -1558,7 +1790,36 @@ class SessionAgent:
             self._tokens_at_last_compaction = prompt_tokens or None
             logger.info("Compaction completed")
         except Exception as e:
+            comp_outcome = METRIC_OUTCOME_ERROR
             logger.error(f"Compaction failed: {e!r}")
+        finally:
+            # **Its own row, never folded into the turn that triggered it** (W#7).
+            #
+            # Measured at 41.5s x 22 on the live deployment.  Charged to that turn,
+            # each turn reads cheap and the month's bill does not reconcile; charged
+            # to the *next* turn, the expensive thing hides inside an innocent
+            # question.  It is neither — it is tail work the lock has already been
+            # released for, so it gets its own line whose ``ts`` is legitimately
+            # later than the triggering turn's.
+            #
+            # Reached only after the compaction actually ran: the ``compaction_fn is
+            # None`` and cooldown-refused paths return above this ``try`` and write
+            # nothing, because no model call was made and a zero-cost row would read
+            # as "compaction is cheap" rather than "compaction did not happen".
+            with anyio.CancelScope(shield=True):
+                await metrics.record(
+                    "compaction",
+                    session_id=self._conversation.session_id,
+                    duration_s=time.monotonic() - comp_t0,
+                    outcome=comp_outcome,
+                    # The signal's own numbers: what the context had grown to, and
+                    # the ceiling it crossed.  Distinct from the usage fields below
+                    # — those are what summarizing *cost*.
+                    signal_prompt_tokens=prompt_tokens or None,
+                    threshold=threshold or None,
+                    messages_covered=covers,
+                    **_usage_fields(comp_usage),
+                )
 
     def _compaction_cooldown_elapsed(self, prompt_tokens: int, threshold: int) -> bool:
         """Whether enough new context accrued since the last compaction.

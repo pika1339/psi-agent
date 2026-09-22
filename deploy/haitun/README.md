@@ -7,6 +7,7 @@
 | `Dockerfile` `Dockerfile.overlay` 两份 `*.dockerignore` `build-image.sh` | **准本**。构建时直接被用, 改这里就是改构建 |
 | `oauth-proxy.py` `launch-gateway.sh` `.env.example` | **副本**。运行中的是目标机上那份, 改这里不生效, 要人工同步 |
 | `audit-workspace-drift.sh` | **判据**。不参与部署, 是投放 `workspace/tools/` 前后拿来量差异的探针 |
+| `monitoring/` | **宿主上跑的监控**。`准本`, 但投放到 `/srv/haitun/monitoring/` 而非容器里 —— 它刻意在被监控对象之外, 见 `monitoring/README.md` |
 
 还有一类东西**不在这个目录里, 也不在镜像里**: `workspace*/tools/` 那 241 个业务工具文件是
 bind mount 到目标机上的, 靠人手 `docker cp` / `cp` 投放。它们是本目录唯一没有构建闸门把着的

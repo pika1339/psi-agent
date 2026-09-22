@@ -80,6 +80,7 @@ src/
     ├── _send_markers.py        # [SEND:] 解码：正则 + 空路径过滤（Channel↔Session 共享）
     ├── _run.py                 # YAML 配置批量启动（psi-agent run config.yml）
     ├── _logging.py              # loguru 配置，verbose→DEBUG
+    ├── metrics.py               # 埋点机制（`record()` + 可替换 sink，默认按天 jsonl）；只提供能力不决定内容、不算钱
     ├── _tls.py                  # 出站 HTTPS 的 TLS 上下文（AuthManager↔AI 层共享；绕开 PQ ClientHello 被丢）
     ├── ai/
     │   ├── AGENTS.md                # AI 层设计文档
@@ -301,6 +302,18 @@ PSI_DEBUG_MODULES=psi_agent.ai.server,psi_agent.channel._core
 7. **filter 的根规则 `""` 是 `_UNLISTED_FLOOR = "WARNING"`，不是 `False`。** loguru 的 `False` 把未列模块**整段**关掉（不是只关 DEBUG），于是这个文件里除白名单外一个字都没有。实测代价：生产 14.5 万行定向 DEBUG 里 `FeishuManager` **零命中**——那个模块的 WARNING 无处可落，排查飞书 workspace 错位时只能靠猜。WARNING 起的记录是**告警**，量小且恰恰是出事时要看的。`PSI_DEBUG_MODULES` 控 DEBUG/INFO 量的语义一字未改，只是未列模块从「全禁」变成「WARNING 起」。用例 `tests/psi_agent/test_logging_warning_floor.py` 两条：未列模块的 WARNING/ERROR 必须落盘 + 未列模块的 DEBUG/INFO 仍被挡且已列模块的 DEBUG 仍收（第二条是反向控制，防着有人图省事把下限调成 `DEBUG`）。
 
 **隐私风险（开启前必读）**：`psi-debug-<pid>.log` 里会有**真实对话内容与用户 open_id**，且刻意**不做脱敏**——打码与“看模型原始输出”直接矛盾，自我对话本身就是要看的东西。纪律：默认关闭；**查完即关**；文件不得复制出生产机、不得贴入工单或聊天；只在需要的那一个容器开。磁盘上限按**进程**算，不是按容器：gateway 容器有两个进程，开一个容器就是约 400 MB；生产一机 7 容器全开会到 2.8 G 量级。靠 `retention=10` 自动删除旧文件兜底。
+
+### 埋点（`metrics.py`，与日志是两回事）
+
+`await record(event, **fields)` 写一行 jsonl，落 `{appdata}/metrics/{YYYY-MM-DD}.jsonl`。整体方案（七类指标、采集点、成本怎么算、日报怎么投递）在 `docs/plans/2026-09-18-可观测性埋点-metrics-log-成本.md`，此处只写内核侧的分层立场与不变量。
+
+- **只提供能力，不决定内容。** 字段全部由调用方传入，模块**不认识任何业务字段名**，也不校验 `event` 白名单（当前调用方只用 `turn` 与 `compaction` 两个值）。内核侧接口不含任何产品概念，**不含金额、不算钱**——单价会变、有阶梯与缓存折扣，把金额烤进埋点意味着单价一改历史就不可比。算钱是报告层的事。
+- **按天分文件即轮转，外加保留期 `RETENTION_DAYS`**，刻意**不复用 loguru 的轮转**：日志轮转会吃掉历史，而成本汇总需要跨天可读。清理只认 `YYYY-MM-DD.jsonl`，解析不出日期的文件一律不碰。
+- **sink 不持文件句柄**，每次 append 开关一次。每会话把整个 workspace 重编一份（实测每会话 114 文件、104 万字节），模块级单例持句柄可能变成每会话一个句柄同时追加同一文件；不持句柄就不需要先去确认这个行为。
+- **`record()` 是 async**（与 `_logging.py` 的同步 `setup_logging` 相反）：落点要走 `_appdata.resolve_appdata_root()`，而它是 async；自己拼 platformdirs 绕开就等于第二处 appname 字面量（约束 4 已为此付过一次代价）。调用方本来就在 async 路径上。
+- **只吞 `Exception`，`CancelledError` 照旧往外传。** 埋点失败绝不能让业务回合失败，但 `suppress(CancelledError)` 这个形状曾导致 anyio 活锁 100% 忙转且零日志。用例 `tests/psi_agent/test_metrics.py` 专门有一条盯住取消往外传——没有它，把 `except Exception` 改成 `except BaseException` 是全绿的。
+- 开关：默认**开**，`PSI_METRICS=0` 关；关掉时是廉价空操作，不先序列化再丢掉。
+- 落盘用二进制 append、换行显式写 `b"\n"`：文本模式在 Windows 上会写成 `\r\n`，而报告层在宿主（Linux）上按行读，`\r` 会跟进最后一个字段的值里。
 
 ## 关键注意事项（踩坑经验）
 

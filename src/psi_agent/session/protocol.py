@@ -236,6 +236,41 @@ class AgentChunk:
     tool_args: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ModelUsage:
+    """One model call's cost inputs, as reported by the upstream ``usage`` object.
+
+    Every token count is ``int | None``, and ``None`` means **not measured** — not
+    zero.  The distinction is the whole point of this type: a turn whose upstream
+    never reported usage costs an unknown amount, while a turn reporting 0 costs
+    nothing, and collapsing the two makes the day's spend silently *lower* exactly
+    when the upstream was misbehaving.  ``AiClient._as_int`` cannot serve here
+    because its 0-on-missing is calibrated for the prompt budget (low = under-packed
+    = safe); in a cost total the same 0 is a false claim.
+
+    ``reported`` carries "did an upstream ``usage`` object arrive at all", which is
+    a different question from "is any individual field populated": a provider may
+    send usage with no ``*_tokens_details`` sub-dict, which is why the detail
+    fields can be ``None`` on a ``reported=True`` usage.
+    """
+
+    reported: bool = False
+    """Whether an upstream ``usage`` object arrived.  ``False`` ⇒ every count below
+    is ``None`` because nothing was measured."""
+    model: str | None = None
+    """Model id off the *stream*, not off the request body: the request carries the
+    pre-routing name, and pricing has to follow whatever actually served the call."""
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    cached_tokens: int | None = None
+    """``prompt_tokens_details.cached_tokens`` — the only source for cache hit rate.
+    Note caching saves *tokens*, not request bytes, so it does not move TTFT."""
+    reasoning_tokens: int | None = None
+    """``completion_tokens_details.reasoning_tokens``.  Frequently ``None`` in this
+    deployment: see ``AiClient._usage`` for what was and was not confirmed."""
+
+
 @dataclass
 class AiDelta:
     """Internal stream element from ``AiClient.stream()``.
@@ -257,11 +292,40 @@ class AiDelta:
     kind: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
+    ttft_s: float | None = None
+    """Seconds from request send to the **first token**, set on that one delta only.
+
+    Carried on the delta rather than re-measured in the agent loop because only the
+    SSE reader knows which chunk was first, and only it holds the pre-send ``t0``.
+    Measuring at the agent would either restart the clock after the request was
+    already on the wire or, worse, key off the response-header moment — the
+    ``AI response status: 200`` line, ~50-60ms of first-hop latency, whose misuse as
+    TTFB produced a since-retracted "upstream TTFB 0.18s" figure.
+    """
+    req_bytes: int | None = None
+    """Serialized request body size, set alongside ``ttft_s``.
+
+    Bytes, not characters: ``delay ≈ bytes / bandwidth`` is the latency model that
+    holds here, and ``json.dumps`` escapes CJK to ``\\uXXXX`` so a character count is
+    off by ~6x in the direction that hides the problem.  Runs a few dozen bytes
+    *under* the true on-wire size — ``ai.server`` injects
+    ``stream_options.include_usage`` after this point — so it is an attribution
+    input, not an exact line count.
+    """
     compaction_needed: bool = False
     prompt_tokens: int = 0
     """Upstream-reported prompt tokens carried by the compaction signal (0 = unknown)."""
     compaction_threshold: int = 0
     """The threshold the signal was raised against (0 = unknown)."""
+    usage: ModelUsage | None = None
+    """Full cost inputs when this chunk carried a ``usage`` object, else ``None``.
+
+    Kept beside ``usage_prompt_tokens`` rather than replacing it: that field feeds
+    ``RequestAssembler.calibrate`` with 0-on-missing semantics that are *correct*
+    for a budget (under-packing is safe), and rewriting it to ``None`` would push a
+    three-valued concern into a hot path that only ever wanted a number.  This one
+    feeds cost accounting, where 0 and "unknown" must never merge.
+    """
     usage_prompt_tokens: int = 0
     """Prompt tokens from the stream's own ``usage`` chunk (0 = not reported yet).
 
