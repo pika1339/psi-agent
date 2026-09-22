@@ -38,6 +38,8 @@ search_content
 fetch
 todo
 clarify
+# 用户粘贴/文件含密钥时: scrub 本地 history/logs + skill 强制风险告知 (见 sensitive-secret-response)
+secret_scrub
 # python_run 是 2026-09-15 实测 24h 流量里的**第三热工具**(83 次, 仅次于 bash 575 /
 # feishu_api 165), 此前不在清单里 —— 清单是按 09 月一次 3 小时窗口定的, 那个窗口没覆盖它。
 python_run

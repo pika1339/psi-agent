@@ -33,7 +33,8 @@ category: media
 ## 第二套多模态 API（BYOK；与 Gateway 主对话 AI 分离）
 
 Tool helper 从下列变量读凭证；**agent 不要传 key**，也不要在对话里问用户要 key。  
-用户应在 workspace 根目录 ``.env.multimodal`` 中填写 ``MINIMAX_API_KEY`` 等。
+用户应在 workspace 根目录 ``.env.multimodal`` 中填写 ``MINIMAX_API_KEY`` 等。  
+缺 key 时走 ``skills/env-api-key-setup/SKILL.md``（先写占位配置文件，再让用户自填）；禁止「请把 key 发给我」。
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
