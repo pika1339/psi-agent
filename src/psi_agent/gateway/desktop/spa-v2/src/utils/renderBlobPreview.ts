@@ -28,6 +28,93 @@ const TEXT_EXTS = new Set([
   'php', 'swift', 'kt', 'kts', 'scala', 'r', 'lua', 'dockerfile', 'gitignore',
 ])
 
+/**
+ * Injected into HTML deliverables for in-app iframe preview.
+ *
+ * Agent-written prototype HTML often ships a full-viewport dimmer + centered
+ * white modal + floating zoom bar (looks fine as a standalone Edge tab, ugly
+ * inside the 宝箱 / chat drawer). 刻意为之: flatten that chrome into a normal
+ * scrolling document so preview matches MD/DOCX; download / 「在文件夹中显示」
+ * still opens the original bytes unchanged.
+ */
+const HTML_PREVIEW_NORMALIZE_CSS = `
+html, body {
+  margin: 0 !important;
+  padding: 16px 20px !important;
+  min-height: 100% !important;
+  height: auto !important;
+  overflow: auto !important;
+  background: #fff !important;
+  color: #172432 !important;
+  box-sizing: border-box !important;
+}
+*, *::before, *::after { box-sizing: border-box; }
+/* Un-stick fixed layers so prototype decks scroll as documents. */
+[style*="position:fixed"],
+[style*="position: fixed"],
+[style*="position:Fixed"] {
+  position: static !important;
+  inset: auto !important;
+  left: auto !important;
+  top: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  width: auto !important;
+  max-width: 100% !important;
+  height: auto !important;
+  min-height: 0 !important;
+}
+/* Drop dimmers that only exist to frame a floating card. */
+[style*="rgba(0,0,0"],
+[style*="rgba(0, 0, 0"],
+[style*="rgba(23,37,46"],
+[style*="rgba(23, 37, 46"],
+[style*="backdrop-filter"] {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+/* Soften floating-card chrome; keep readable content width. */
+[class*="modal"],
+[class*="dialog"],
+[class*="popup"],
+[class*="overlay"],
+[class*="backdrop"],
+[class*="scrim"] {
+  position: static !important;
+  transform: none !important;
+  margin: 0 !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+/* Hide prototype zoom / page chrome bars common in agent HTML decks. */
+[class*="toolbar"],
+[class*="zoom-bar"],
+[class*="zoombar"],
+[class*="control-bar"],
+[class*="page-controls"],
+[class*="viewer-controls"] {
+  display: none !important;
+}
+img, svg, video, canvas, iframe { max-width: 100% !important; height: auto !important; }
+`
+
+/** Wrap raw HTML so in-app preview flattens modal/prototype chrome. */
+export function wrapHtmlForInAppPreview(source: string): string {
+  const inject = `<style data-psi-html-preview-normalize>${HTML_PREVIEW_NORMALIZE_CSS}</style>`
+  if (/<\/head>/i.test(source)) {
+    return source.replace(/<\/head>/i, `${inject}</head>`)
+  }
+  if (/<html[\s>]/i.test(source)) {
+    return source.replace(/<html([^>]*)>/i, `<html$1><head>${inject}<meta charset="utf-8"></head>`)
+  }
+  return `<!DOCTYPE html><html><head>${inject}<meta charset="utf-8"></head><body>${source}</body></html>`
+}
+
 export type BlobPreviewFile = { name: string; data: string }
 
 export type BlobPreviewHandle = {
@@ -175,19 +262,26 @@ function normalizeRow(row: unknown): unknown[] {
 
 function createTable(rows: unknown[][]): HTMLElement {
   const wrap = document.createElement('div')
+  // Same card chrome as `.md-table-card` / `.docx-table-scroll`; scroll lives on this wrap.
   wrap.className = 'preview-table-wrap'
   const table = document.createElement('table')
   table.className = 'preview-table'
+  const colCount = rows.reduce((max, row) => Math.max(max, row.length), 0)
   const tbody = document.createElement('tbody')
-  rows.forEach((row, rowIndex) => {
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] ?? []
     const tr = document.createElement('tr')
-    row.forEach((cell) => {
+    for (let col = 0; col < colCount; col += 1) {
+      const cell = row[col]
       const td = document.createElement(rowIndex === 0 ? 'th' : 'td')
-      td.textContent = cell == null ? '' : String(cell)
+      const text = cell == null || cell === '' ? '' : String(cell)
+      td.textContent = text
+      // Ellipsis truncates wide cells; title keeps full value on hover.
+      if (text) td.title = text
       tr.append(td)
-    })
+    }
     tbody.append(tr)
-  })
+  }
   table.append(tbody)
   wrap.append(table)
   return wrap
@@ -295,7 +389,8 @@ export async function renderBlobPreview(
       iframe.title = file.name || 'HTML preview'
       iframe.setAttribute('sandbox', '')
       iframe.setAttribute('referrerpolicy', 'no-referrer')
-      objectUrl = URL.createObjectURL(new Blob([bounded.text], { type: 'text/html;charset=utf-8' }))
+      const previewHtml = wrapHtmlForInAppPreview(bounded.text)
+      objectUrl = URL.createObjectURL(new Blob([previewHtml], { type: 'text/html;charset=utf-8' }))
       iframe.src = objectUrl
       host.append(iframe)
       return { cleanup, notice }

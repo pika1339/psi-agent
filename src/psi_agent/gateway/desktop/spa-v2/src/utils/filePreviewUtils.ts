@@ -19,8 +19,21 @@ export function dataUrlForChatFile(file: ChatFile): string {
 
 export function downloadChatFile(file: ChatFile): void {
   const a = document.createElement('a')
-  a.href = dataUrlForChatFile(file)
   a.download = file.name
+  const ext = (file.name.split('.').pop() || '').toLowerCase()
+  // Browsers often navigate to text/html data URLs instead of downloading —
+  // that opens Edge with the file's own modal chrome (ugly "自动弹出"). Force
+  // a binary Blob so Download always saves.
+  if (ext === 'html' || ext === 'htm') {
+    const raw = (file.data.includes(',') ? file.data.split(',')[1]! : file.data).replace(/\s/g, '')
+    const bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }))
+    a.href = url
+    a.click()
+    URL.revokeObjectURL(url)
+    return
+  }
+  a.href = dataUrlForChatFile(file)
   a.click()
 }
 

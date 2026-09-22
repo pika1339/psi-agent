@@ -2409,8 +2409,9 @@ export default function HaiTunAgentWorkspace({
                       {unitHasDelivery ? t("app.viewDeliveries") : t("app.noDeliveriesShort")}
                     </span>
                   </span>
-                  <button type="button" className="chat-new-task" onClick={() => openNewTask()}>
-                    <Plus size={13} /> {t("app.newTask")}
+                  <button type="button" className="chat-new-task" onClick={() => openNewTask()} aria-label={t("app.newTask")}>
+                    <Plus size={13} aria-hidden />
+                    <span>{t("app.newTask")}</span>
                   </button>
                 </>
               )}
@@ -2854,8 +2855,9 @@ export default function HaiTunAgentWorkspace({
           </div>
           {!chatExpanded && (
             <div className="stage-actions">
-              <button type="button" className="topbar-create-button" onClick={() => openNewTask()}>
-                <Plus size={15} /> {t("app.newTask")}
+              <button type="button" className="topbar-create-button" onClick={() => openNewTask()} aria-label={t("app.newTask")}>
+                <Plus size={15} aria-hidden />
+                <span>{t("app.newTask")}</span>
               </button>
             </div>
           )}
@@ -2866,8 +2868,9 @@ export default function HaiTunAgentWorkspace({
             <AgentMark />
             <h1>{t("app.emptyTitle")}</h1>
             <p>{t("app.emptyDesc")}</p>
-            <button type="button" className="topbar-create-button" onClick={() => openNewTask()}>
-              <Plus size={15} /> {t("app.newTask")}
+            <button type="button" className="topbar-create-button" onClick={() => openNewTask()} aria-label={t("app.newTask")}>
+              <Plus size={15} aria-hidden />
+              <span>{t("app.newTask")}</span>
             </button>
           </section>
         )}
