@@ -11,6 +11,7 @@ from loguru import logger
 from PIL import Image
 
 from psi_agent.gateway.desktop._attention import _make_highlight_image, pulse_tray_icon
+from psi_agent.gateway.desktop._console_focus import activate_existing_console
 from psi_agent.gateway.desktop._spa_shell import DEFAULT_APP_NAME
 
 
@@ -94,6 +95,9 @@ class GatewayTray:
         pulse_tray_icon(self._icon, self._normal_image, self._highlight_image)
 
     def _open_browser(self, icon: Any = None) -> None:
+        # Prefer activating the live tab (same rule as haitun.exe second click).
+        if activate_existing_console(self._app_name):
+            return
         webbrowser.open(self._url)
 
     def _quit(self, icon: Any = None) -> None:

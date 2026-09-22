@@ -32,12 +32,15 @@ chart API instead (see Charts below).
 
 1. **Clarify the deliverable** if ambiguous: which format, and what sections/data go in it.
    If the user already gave the data or an analysis, don't re-ask — go straight to authoring.
-2. **Write a small Python script** using the right library, run it with the tool runner, and
-   save to a clear path (e.g. `report.docx`). Do not hand-write the OOXML.
+2. Prefer first-class tools when they fit: `write_word` / `write_word_from_markdown` for Word,
+   `write_excel` for simple sheets. Otherwise write a small Python script (`python-docx` /
+   `python-pptx` / `openpyxl`) via `python_run`, and save to a clear path (e.g. `report.docx`).
+   Do not hand-write the OOXML.
 3. **Verify** the file was created (check it exists and re-open it to read back a value / slide
    count / sheet name) before telling the user it's done. Report the absolute output path.
-4. If the user wants it delivered over a channel (Telegram/Feishu), emit the `[SEND:path]`
-   marker so the file is sent, not just described.
+4. **有文件就 SEND（硬规则）**：本回合只要写出了用户要看的 Office / 报告文件（`.docx` / `.pptx` /
+   `.xlsx` / `.md` / `.pdf` 等），最终回复**必须**在助手气泡里单独一行写 `[SEND:<绝对路径>]`。
+   写到磁盘 ≠ 发给用户；不要停在「已生成 / saved」；不要等用户再说「发给我」；不要用其它消息工具代替 `[SEND:]`。
 
 ## Word (.docx) — python-docx
 

@@ -3,7 +3,8 @@
 刻意为之: single-instance for the *exe* lives in ``haitun.c`` (named mutex).
 This module only answers that second click: when the launcher finds the mutex
 already held, it ``SetEvent`` on a fixed named Event; a tray-mode Gateway
-listens and re-opens the console (browser / webview), like Cursor / Feishu.
+listens and *activates* the live console (webview show, or existing browser
+window by title — never a stacked ``webbrowser.open`` when one already exists).
 
 Terminal multi-Gateway is unchanged — no mutex there; AppData lock is the
 memory-zone gate. Event name must match ``haitun.c`` byte-for-byte.

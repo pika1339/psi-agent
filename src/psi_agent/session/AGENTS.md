@@ -72,7 +72,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
    - tool 执行起止 → 仍写入 **同一** `reasoning` 槽（刻意压缩，便于 Session↔AI OpenAI 形同构），`kind="tool_call"|"tool_result"`；正文可继续带 `[Tool Call:]`/`[Tool Result:]` 过渡标记
    - tool_calls → 累积（按 index 拼接 partial JSON）
     - `finish_reason="tool_calls"` → 逐个过 `ToolCallConvergence.refusal_for()`（见「回合收敛」，被拒的**不发出**，改把说明性字符串当结果）→ 执行余下 tool → 结果追加到 history → 回到步骤 4
-    - finish_reason="stop" → 最终 content 追加到 history + `commit()` + 刷新 schedule registry + 若收到 compaction 信号则 `_request_compaction()` 记账 → 释放锁 → 锁外 `drain_pending_compaction()` 才真发压缩调用。落盘前经 ``send_delivery.missing_send_paths`` 补缺本回合 ``write`` / ``write_*`` 成功结果对应、且回复里尚无的 ``[SEND:]``（见下「缺 [SEND:] 自动补」）
+    - finish_reason="stop" → 最终 content 追加到 history + `commit()` + 刷新 schedule registry + 若收到 compaction 信号则 `_request_compaction()` 记账 → 释放锁 → 锁外 `drain_pending_compaction()` 才真发压缩调用。落盘前经 ``send_delivery.missing_send_paths`` 补缺本回合已写出、且回复里尚无的交付物 ``[SEND:]``（见下「缺 [SEND:] 自动补」）
    - finish_reason="error" → 回滚到快照 → `raise AgentError(message)`（早期 `commit` 已清快照，**用户行保留**）
    - Stop / 断开 / `aclose` → `_abandon_incomplete_turn` 截掉本回合再向上传播（**用户行不保留**）
    - 其他未捕获异常 → 同 cancel（abandon）或随 `__aexit__` rollback，视是否走过早期 commit
@@ -86,9 +86,13 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 **纯现有线格式上的安全网**——不新增 `finish_reason`、REST、chunk type：
 
 1. ``finish_reason=stop``、落盘前读本回合 history 切片（``turn_start:``）；
-2. 在成功的 ``write`` / ``write_excel`` / ``write_word`` / ``write_word_from_markdown`` 结果里用 ``[OK] … to <path>`` 抽路径（``edit`` / 裸 ``bash`` **不做**——假阳性太多）；
+2. **两道闸，中一道即补**（刻意为之，别删成只剩工具名或只剩后缀）。
+   - 工具名闸：下列工具的 ``[OK] … to <path>`` **或** JSON ``ok: true`` + 顶层输出路径，路径没有常见后缀也补——``write`` / ``write_excel`` / ``write_word`` / ``write_word_from_markdown`` / ``generate_image`` / ``text_to_speech`` / ``feishu_chart`` / ``feishu_chart_figure`` / ``feishu_doc_export`` / ``feishu_file_download``。``edit`` / ``bash`` / ``python_run`` **不在**这张名单里（PPT 等多半走 ``python_run``，靠后缀闸）。
+   - 后缀闸：不看工具名。路径落在 ``DELIVERABLE_SUFFIXES``（``.md`` / ``.json`` / ``.ppt`` / ``.pptx`` / ``.jpg`` / ``.jpeg`` / ``.png`` / ``.docx`` / ``.xlsx`` / ``.pdf`` / ``.excalidraw`` 以及常见图片、音视频、压缩包），且形状是 ``[OK] … to <path>``，或 JSON ``ok`` 为 true、顶层 ``path`` / ``save_path`` / ``image_path`` / ``output_path`` / ``file_path``。JSON 里非空 ``text`` 表示这是在描述或转写**已有**文件（识图 / 语音转文字），路径是输入，不补。
+   ``edit`` 的成功句是 ``in <path>`` 不是 ``to``，自然不进。裸 shell / ``python_run`` 不在工具名闸里，普通命令输出不会补；只有 stdout **正好**是上面两种交付物形状时，后缀闸才会补。
+   无后缀、又不属于工具名闸的路径不补（避免把「to Alice」当成文件）。
 3. 与 ``extract_send_paths(reply)`` 比对，缺的拼成普通 ``[SEND:]`` 行追加到 ``accumulated_content``，再 ``yield AgentChunk(content=suffix)``——Channel 现有 scanner 照扫；
-4. 跳过 ``tools/`` ``skills/`` ``schedules/`` ``systems/`` ``histories/`` ``channel_events/`` ``triggers/`` 路径段（对齐提示词「勿自动发送能力包」）。
+4. 跳过 ``tools/`` ``skills/`` ``schedules/`` ``systems/`` ``histories/`` ``channel_events/`` ``triggers/`` 路径段（对齐提示词「勿自动发送能力包」）。两道闸都跳过这些段。
 
 判据：`tests/psi_agent/session/test_send_delivery.py`。
 

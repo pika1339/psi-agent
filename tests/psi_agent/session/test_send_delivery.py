@@ -14,6 +14,7 @@ from psi_agent.session.send_delivery import (
     FILE_CREATE_TOOLS,
     created_file_paths_from_turn,
     is_blocked_auto_send_path,
+    is_deliverable_path,
     missing_send_paths,
     path_from_ok_tool_result,
     send_marker_suffix,
@@ -41,7 +42,75 @@ def test_blocked_paths_skip_capability_package() -> None:
     assert is_blocked_auto_send_path(r"C:\Users\me\Desktop\haitun交付\方案.docx") is False
 
 
-def test_created_paths_only_from_named_create_tools() -> None:
+def test_deliverable_suffix_rejects_bare_words() -> None:
+    assert is_deliverable_path("out/a.md") is True
+    assert is_deliverable_path(r"C:\ws\deck.PPTX") is True
+    assert is_deliverable_path("shot.JPG") is True
+    assert is_deliverable_path("shot.png") is True
+    assert is_deliverable_path("slides.ppt") is True
+    assert is_deliverable_path("data.json") is True
+    assert is_deliverable_path("board.excalidraw") is True
+    assert is_deliverable_path("notes") is False
+    assert is_deliverable_path(".gitignore") is False
+    assert is_deliverable_path("to Alice") is False
+
+
+def test_named_create_tools_cover_writers_and_exports() -> None:
+    assert {
+        "write",
+        "write_excel",
+        "write_word",
+        "write_word_from_markdown",
+        "generate_image",
+        "text_to_speech",
+        "feishu_chart",
+        "feishu_chart_figure",
+        "feishu_doc_export",
+        "feishu_file_download",
+    } == FILE_CREATE_TOOLS
+
+
+def test_named_create_tool_sends_a_path_with_no_suffix() -> None:
+    messages = [
+        {
+            "role": "tool",
+            "name": "write",
+            "content": "[OK] Written 4 bytes to out/notes",
+            "tool_call_id": "1",
+        },
+        {
+            "role": "tool",
+            "name": "write_ppt",
+            "content": "[OK] Wrote 1 slide(s) to out/deck",
+            "tool_call_id": "2",
+        },
+        {
+            "role": "tool",
+            "name": "write",
+            "content": "[OK] Written 1 bytes to skills/secret.md",
+            "tool_call_id": "3",
+        },
+        {
+            "role": "tool",
+            "name": "generate_image",
+            "content": '{"ok": true, "path": "generated/images/no-ext"}',
+            "tool_call_id": "4",
+        },
+        {
+            "role": "tool",
+            "name": "feishu_doc_export",
+            "content": '{"ok": true, "save_path": "exports/board"}',
+            "tool_call_id": "5",
+        },
+    ]
+    assert created_file_paths_from_turn(messages) == [
+        "out/notes",
+        "generated/images/no-ext",
+        "exports/board",
+    ]
+
+
+def test_created_paths_follow_result_shape_not_tool_name() -> None:
     messages = [
         {"role": "assistant", "content": "writing"},
         {
@@ -53,25 +122,80 @@ def test_created_paths_only_from_named_create_tools() -> None:
         {
             "role": "tool",
             "name": "edit",
-            "content": "[OK] Edited out/a.md",
+            "content": "[OK] Replaced 1 occurrence in out/a.md",
             "tool_call_id": "2",
         },
         {
             "role": "tool",
             "name": "bash",
-            "content": "[OK] Written 1 bytes to out/secret.md",
+            "content": "ls\nout/secret.md\n",
             "tool_call_id": "3",
+        },
+        {
+            "role": "tool",
+            "name": "python_run",
+            "content": "[OK] Wrote 12 slide(s) to out/deck.pptx",
+            "tool_call_id": "4",
         },
         {
             "role": "tool",
             "name": "write_excel",
             "content": "[OK] Wrote 2 row(s) to out/b.xlsx",
-            "tool_call_id": "4",
+            "tool_call_id": "5",
+        },
+        {
+            "role": "tool",
+            "name": "text_to_speech",
+            "content": '{"ok": true, "path": "generated/audio/tts-1.mp3", "text": "", "message": "ok"}',
+            "tool_call_id": "6",
+        },
+        {
+            "role": "tool",
+            "name": "speech_to_text",
+            "content": '{"ok": true, "path": "in/voice.mp3", "text": "你好"}',
+            "tool_call_id": "7",
+        },
+        {
+            "role": "tool",
+            "name": "save_image",
+            "content": "[OK] Wrote image to out/shot.jpg",
+            "tool_call_id": "10",
+        },
+        {
+            "role": "tool",
+            "name": "feishu_chart",
+            "content": '{"ok": true, "chart_type": "pie", "image_path": "charts/a.png"}',
+            "tool_call_id": "8",
+        },
+        {
+            "role": "tool",
+            "name": "describe_image",
+            "content": '{"ok": true, "text": "a cat", "image_path": "in/cat.png"}',
+            "tool_call_id": "9",
+        },
+        {
+            "role": "tool",
+            "name": "generate_image",
+            "content": '{"ok": true, "path": "generated/images/gen-1.png"}',
+            "tool_call_id": "11",
+        },
+        {
+            "role": "tool",
+            "name": "write",
+            "content": "[OK] Written 20 bytes to out/data.json",
+            "tool_call_id": "12",
         },
     ]
-    assert created_file_paths_from_turn(messages) == ["out/a.md", "out/b.xlsx"]
-    assert "edit" not in FILE_CREATE_TOOLS
-    assert "bash" not in FILE_CREATE_TOOLS
+    assert created_file_paths_from_turn(messages) == [
+        "out/a.md",
+        "out/deck.pptx",
+        "out/b.xlsx",
+        "generated/audio/tts-1.mp3",
+        "out/shot.jpg",
+        "charts/a.png",
+        "generated/images/gen-1.png",
+        "out/data.json",
+    ]
 
 
 def test_missing_send_skips_already_marked() -> None:

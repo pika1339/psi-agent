@@ -14,7 +14,7 @@ category: media
 |------|---------|
 | 用户话 → `description` | 校验入参、读 IMAGE_GEN env、调 API |
 | 可选：参考图路径 → `reference_images` | 调 `/images/generations`（文生图） |
-| 读 JSON → 说明 + `[SEND:path]` 或报错 | 返回 `ok`, `path`, `backend`, … |
+| 读 JSON → 说明 + **必须** `[SEND:path]` 或报错 | 返回 `ok`, `path`, `backend`, … |
 
 **禁止：** 把用户原话（「请帮我画一只猫」）直接塞进 `description`；**禁止**用 `read` / `bash` 代替生图；**禁止**在对话里贴大图字节代替文件交付。
 
@@ -122,10 +122,10 @@ Tool 返回 **一个 JSON 字符串**（不是 markdown）。解析后看：
 
 `ok: false` → 向用户说明 `message`（常见：多模态 API 未配置或上游报错），**不要** `[SEND:]`，不要假装成功。
 
-### Step 4 — 交付
+### Step 4 — 交付（有文件就 SEND，硬规则）
 
 1. **1–3 句**说明画了什么、关键参数（若用户关心尺寸/风格）。  
-2. **单独一行**发出文件（路径必须来自 JSON 的 `path`）：
+2. **`ok: true` 时必须**单独一行发出文件（路径必须来自 JSON 的 `path`）。写到磁盘 ≠ 发给用户；不要停在「已生成」；不要等用户再说「发给我」：
 
 ```text
 [SEND:D:/absolute/path/to/image.png]

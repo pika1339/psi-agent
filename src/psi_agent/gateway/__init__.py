@@ -27,6 +27,7 @@ from psi_agent.gateway._defaults import (
 from psi_agent.gateway._state import GatewayState
 from psi_agent.gateway.desktop._attention import AttentionHub
 from psi_agent.gateway.desktop._auth_manager import AuthManager, resolve_endpoint
+from psi_agent.gateway.desktop._console_focus import reopen_gateway_console
 from psi_agent.gateway.desktop._free_model import make_key_resolver
 from psi_agent.gateway.desktop._installer_activate import InstallerActivateListener
 from psi_agent.gateway.desktop._routes import register_desktop_routes
@@ -595,16 +596,16 @@ class Gateway:
                     except Exception as e:
                         logger.warning(f"Failed to start system tray: {e!r}")
 
-                    # 装机版 haitun.exe 二次点击: mutex 拦住复开后 SetEvent 到这里, 再开控制台.
+                    # 装机版 haitun.exe 二次点击: mutex 拦住复开后 SetEvent 到这里.
+                    # 刻意为之: 唤回已有控制台窗口, 不 webbrowser.open 叠页 (C14).
                     # 终端多 Gateway 不走 exe mutex; 仅 --tray 时装监听 (与装机启动参数对齐).
                     def _reopen_console() -> None:
-                        if wv is not None and wv.is_running():
-                            wv.show()
-                            wv.request_attention()
-                        else:
-                            webbrowser.open(addr)
-                        if tray is not None and tray.is_running():
-                            tray.request_attention()
+                        reopen_gateway_console(
+                            url=addr,
+                            app_name=self.app_name,
+                            webview=wv if wv is not None and wv.is_running() else None,
+                            tray=tray if tray is not None and tray.is_running() else None,
+                        )
 
                     installer_activate = InstallerActivateListener(_reopen_console)
                     installer_activate.start()

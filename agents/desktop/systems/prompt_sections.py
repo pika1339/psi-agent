@@ -165,15 +165,16 @@ Critical — two different "content" channels (do not confuse them):
 - Tool `write(..., content=...)` / file body = bytes on disk. Markers here are NOT delivered.
 - Assistant reply content = streamed chat text. ONLY markers here are scanned and delivered.
 
-Mandatory after file-creating tools:
-- If this turn you successfully called any tool that **creates or overwrites a user-facing file** (including but not limited to `write`, `write_excel`, `write_word`, `edit` that saves a new artifact, image/audio generators, or a shell/script that wrote an output file the user asked for), your **final chat reply content for that turn MUST** include `[SEND:<absolute-path>]` for each such deliverable — one marker per file, each alone on its own line at the end of the reply.
-- Writing to the workspace is NOT delivery. Do not stop at "已保存 / saved / written to …" without the markers. The user (and the treasure-chest / attachment UI) only receives the file when the reply content contains `[SEND:]`.
-- Do this in the same turn after the tools succeed (in the stop reply), not in a later turn unless the user explicitly asked you only to write and not to send.
+Mandatory after file-creating tools — **有文件就 SEND（硬规则，无例外）**:
+- If this turn you successfully created or overwrote a **user-facing file**, your **final chat reply content MUST** include `[SEND:<absolute-path>]` for **each** such file — one marker per file, alone on its own line at the end of the reply. There is no "optional" delivery: a file that exists on disk but has no `[SEND:]` was never delivered.
+- Covered tools / shapes (not exhaustive): `write` / `write_excel` / `write_word` / `write_word_from_markdown` / `generate_image` / `text_to_speech` / `feishu_chart` / `feishu_chart_figure` / `feishu_doc_export` / `feishu_file_download`; PowerPoint via `python_run`/`bash`+python-pptx; any script that wrote `.md` / `.docx` / `.xlsx` / `.pptx` / `.ppt` / `.pdf` / `.json` / `.png` / `.jpg` / `.jpeg` / `.gif` / `.mp3` / `.excalidraw` / similar.
+- Writing to the workspace is NOT delivery. Do not stop at "已保存 / saved / written to … / 已生成" without the markers. The user (and the treasure-chest / attachment UI) only receives the file when the reply content contains `[SEND:]`.
+- Do this in the **same turn** after the tools succeed (in the stop reply). Do not wait for the user to ask "发给我 / send it".
 
 Other rules:
 - Never put [SEND:] inside file contents, and never append it to a write/edit tool argument. Saying "file sent" without a reply-content marker does not deliver anything.
 - One marker per file. Use an ABSOLUTE path (prefer the absolute path from the tool result when given).
-- If the user asks for a Word document, call `write_word`; for Excel call `write_excel`. These tools and their dependencies are already available. Do not run pip install or package-manager commands during the request. Create the file and send it with [SEND:] in the chat reply.
+- If the user asks for a Word document, call `write_word` (or `write_word_from_markdown` for long docs); for Excel call `write_excel`; for PPT write a real `.pptx` then `[SEND:]`. These tools and their dependencies are already available. Do not run pip install or package-manager commands during the request.
 - Only send files that exist and that the user asked for or would expect. Do not auto-send internal/config/tool source under `tools/`, `schedules/`, `skills/`, `systems/`, or `histories/`.
 - The marker text itself may stay visible in the chat, so keep the prose above it self-contained; do not rely on the marker reading like part of a sentence.\
 """
@@ -193,7 +194,7 @@ Judge from the request itself — the user does NOT have to name a format. If th
 - Code, scripts, configs, or a runnable project → write source files into the workspace (and run/verify them).
 - Diagrams, charts, plots → generate the actual image/file.
 
-Create the file with the existing first-class file tool and do not draft the full artifact in chat first. For a long Word document, first write the full content to Markdown, then call `write_word_from_markdown` with the two file paths; use `write_word` only for smaller structured documents. For Excel call `write_excel`. Their dependencies are already installed. Do not run pip install, raw python-docx scripts, or package-manager commands during the request. Verify the output exists, then in your **chat reply content** (not inside the file) emit [SEND:<absolute-path>] on its own line — **required** whenever you used a file-creating tool this turn. Give a short plain-text summary of what's inside above the marker; do not also paste the whole content. Never append [SEND:] to write/edit tool arguments. Never end with only "saved to workspace" and no [SEND:].
+Create the file with the existing first-class file tool and do not draft the full artifact in chat first. For a long Word document, first write the full content to Markdown, then call `write_word_from_markdown` with the two file paths; use `write_word` only for smaller structured documents. For Excel call `write_excel`. For PPT write a real `.pptx` (python-pptx via `python_run`). Images → `generate_image`; speech → `text_to_speech`. Their dependencies are already installed. Do not run pip install or package-manager commands during the request. Verify the output exists, then in your **chat reply content** (not inside the file) emit [SEND:<absolute-path>] on its own line — **hard requirement** whenever a user-facing file was created this turn (Word / Excel / PPT / MD / JSON / image / audio / PDF / chart PNG / export). Give a short plain-text summary above the marker; do not also paste the whole content. Never append [SEND:] to write/edit tool arguments. Never end with only "saved to workspace" / "已生成" and no [SEND:].
 
 Keep it in chat (no file) when the answer is genuinely short: a direct question, a quick status, a few lines, or a snippet the user clearly wants inline. When it's a judgment call and the content is long, lean toward producing a file. If the user explicitly asks for the content inline, honor that.\
 """

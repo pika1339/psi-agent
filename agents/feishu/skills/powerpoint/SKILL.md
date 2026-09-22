@@ -20,12 +20,11 @@ Reply in Chinese unless the user clearly uses another language.
 
 1. **Clarify** the deliverable only if ambiguous (new deck vs. edit existing, which slides,
    what content). If the user already gave the data/outline, go straight to authoring.
-2. **Write a small Python script** using `python-pptx`, run it with the tool runner, and save
-   to a clear path (e.g. `deck.pptx`). Never hand-write the OOXML.
+2. **Write a small Python script** using `python-pptx`, run it with `python_run` (or `bash`),
+   and save to a clear path ending in `.pptx` (e.g. `deck.pptx`). Never hand-write the OOXML.
 3. **Verify** before claiming done: reopen the saved file and read back a slide count / a
    title / a note. Report the absolute output path.
-4. If the deck should be delivered over a channel (Telegram/Feishu), emit the `[SEND:path]`
-   marker so the file is sent, not just described.
+4. **有文件就 SEND（硬规则）**：本回合只要写出了用户要看的 `.pptx`，最终回复**必须**在助手气泡里单独一行写 `[SEND:<绝对路径>]`。写到磁盘 ≠ 发给用户；不要停在「已生成 / saved」；不要等用户再说「发给我」；不要用其它消息工具代替 `[SEND:]`。
 
 ## Create a deck from scratch
 

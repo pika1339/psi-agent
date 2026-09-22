@@ -16,8 +16,8 @@ category: media
 1. 整理要朗读的纯文本。
 2. 调用 `text_to_speech(text=...)`。
 3. 解析工具返回的 JSON。
-4. `ok: true` 时，用返回的绝对 `path` 单独输出 `[SEND:<path>]`。
-5. `ok: false` 时说明 `message`，不要假装生成成功。
+4. **有文件就 SEND（硬规则）**：`ok: true` 时，用返回的绝对 `path` 在最终回复里**单独一行**输出 `[SEND:<path>]`。写到磁盘 ≠ 发给用户；不要停在「已生成」；不要等用户再说「发给我」。
+5. `ok: false` 时说明 `message`，不要假装生成成功，也不要 `[SEND:]`。
 
 ## 固定接口与环境变量
 

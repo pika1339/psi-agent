@@ -77,7 +77,8 @@ A5 把模块文件搬进两个子包后，这条曾**不成立**：两个 `regis
 | `desktop/spa/` | Vue 3 SPA v1（对话气泡），构建输出 `spa/dist/`；路径 `/spa/` |
 | `desktop/spa-v2/` | React SPA v2（任务工作台 + 宝箱），构建输出 `spa-v2/dist/`；**默认** `GET /` → `/spa-v2/`（无 dist 时回退 v1） |
 | `feishu/feishu-web/` | ToB 前端（Vite + React 19），构建输出 `feishu-web/dist/`；路径 `/feishu-web/`。**A6 只落脚手架**：能构建 / 能起 dev server / 能连本机 gateway（页面里一次 `fetch('/defaults')` 就是连通性判据），页面是占位、零业务。登录、会话列表、对话收发由后续开发。`vite.config.ts` 的 `base` 与后端 `add_static` 前缀是同一字面量，改一边忘另一边会静默 404。详见 `feishu-web/AGENTS.md` |
-| `desktop/_tray.py` | 系统托盘图标（pystray + Pillow），由 `--tray` 参数开启，`--icon` 参数指定图标文件，左键打开浏览器或恢复 webview 窗口，右键菜单控制；`request_attention()` 脉冲高亮图标 |
+| `desktop/_tray.py` | 系统托盘图标（pystray + Pillow），由 `--tray` 参数开启，`--icon` 参数指定图标文件，左键**优先唤回**已有控制台（`activate_existing_console`）再 `webbrowser.open`，右键菜单控制；`request_attention()` 脉冲高亮图标 |
+| `desktop/_console_focus.py` | 二次点击 / 托盘唤回：按窗口标题含 `app_name` 激活已有浏览器；`reopen_gateway_console` 分支 `webview` → `activate` → `open`（仅无匹配窗口才开新页；刻意为之，勿改回叠页） |
 | `desktop/_webview.py` | 原生 webview 窗口（pywebview），`--webview` 参数开启。窗口关闭信号通过 `threading.Event` 传递给主 loop；`request_attention()` 在 Windows 上 FlashWindowEx |
 | `desktop/_attention.py` | `AttentionHub`：SPA `POST /ui/attention` → 绑定的 tray/webview 注意力提示（best-effort）。`schedule_notify()` 用 daemon thread 异步触发，**禁止**在 aiohttp handler 里同步等 tray（pystray 可能卡死事件循环） |
 | `_openapi.py` | `GET /openapi.json` schema 装配 — `build_openapi_spec(desktop=, feishu=, oauth=)` 把下面四份片段按开关拼起来；`OPENAPI_SPEC` 是「全都要」的那份（path key 集合与拆分前一致）。**按 path key 分份、不按当前谁在调用**：路由注册分开后各线只贴自己那份。`render_openapi(...)` 由 handler 按 `app["openapi_desktop"]` / `app["openapi_feishu"]` / `app["openapi_oauth"]` 三面旗子传参（旗子由各 `register_*_routes` 立），所以 spec 报的就是本进程真注册了的那批 path |
@@ -952,6 +953,8 @@ psi-agent.exe gateway --tray --browser --icon haitun.ico --verbose
 ```
 
 `{app}` / 桌面路径在运行时解析（安装目录 + `SHGetFolderPath`），**禁止**写死本机用户路径。`--appdata` 可不传（软默认 `platformdirs`；**刻意为之**不显式传，安装包与 CLI 共用同一解析）。另：Gateway 软默认在 cwd 含 `tools/`+`skills/` 时也会把 cwd 当 agent（兜底直接跑 `psi-agent.exe`）。
+
+**二次点击语义（刻意为之，勿改回叠页）**：`haitun.exe` 命名互斥量 + AppData `gateway.instance.lock` 保证**不起第二个 Gateway**；已在跑时二次点击只 `SetEvent` 后退出。Gateway `--tray` 侧 `InstallerActivateListener` 收到后走 `reopen_gateway_console`：**优先** `webview.show()`，否则按窗口标题含 `app_name` **唤回**已有浏览器窗口——**禁止**在已有控制台时再 `webbrowser.open` 叠页（那是 C14「同 Gateway 双浏览器」的成因）。找不到匹配窗口（用户已关标签）才打开一页。托盘「打开控制台」同一规则。事件名与 `haitun.c` 的 `HAITUN_ACTIVATE_EVENT` 逐字节一致（判据 `test_installer_activate.py` / `test_console_focus.py`）。
 
 `--feishu-ai-id ID` 指定飞书 Session（经 `POST /feishu/route` 按需 spawn）默认挂载的 AI 实例 id。未配时若请求也不带 `ai_id`，`/feishu/route` 返回 400。`--feishu-workspace-root DIR` 指定各飞书会话独立 workspace 的父目录（私聊每个 open_id 得 `<root>/<open_id>`，群聊每个 chat_id 得 `<root>/chat-<chat_id>`）；空则以 Gateway 进程 cwd 为父。两者均为飞书多会话独立渠道服务（配合飞书 channel 的 `--gateway-url`，见 `channel/AGENTS.md`）。
 
