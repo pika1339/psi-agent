@@ -516,6 +516,30 @@ async def _collect_skill_dirs(skills_dir: anyio.Path) -> list[tuple[str, anyio.P
     return entries
 
 
+async def _resolve_skill_path(agent_dir: anyio.Path, skill: str) -> anyio.Path | None:
+    """Return the **resolved** path of ``<root>/skills/<skill>/SKILL.md``, or None if absent.
+
+    Why resolved and not relative: ``read`` (and the other file tools) resolve relative paths under
+    the **user workspace**, while skills live in the **agent package**. In the installer layout those
+    are different roots (``--default-agent {app}`` / ``--default-workspace {Desktop}\\haitun交付``),
+    so a prompt that says "read ``skills/<name>/SKILL.md``" points at a path that does not exist and
+    the rule set silently never loads. Injection sites should embed the string returned here.
+
+    Search order is the same one ``_build_skills_index`` uses, and ``_collect_skill_dirs`` is reused
+    rather than re-implemented: a prompt that tells the model to read a skill the index listed must
+    be able to find it, so the two lookups may not disagree about where skills live.
+    """
+    for root in (agent_dir, _GLOBAL_AGENT_SKILLS_DIR):
+        for name, skill_md in await _collect_skill_dirs(root / "skills"):
+            if name != skill:
+                continue
+            # Resolve so the injected path is absolute and free of `..`/symlink indirection.
+            with contextlib.suppress(OSError):
+                return await skill_md.resolve()
+            return skill_md
+    return None
+
+
 async def _build_skills_index(workspace_dir: anyio.Path) -> str:
     skills_dir = workspace_dir / "skills"
 
@@ -1308,7 +1332,24 @@ this workspace, generated workflows, instruction files, or committed `.env` file
         budget.add_if(await (ws / "BOOTSTRAP.md").exists(), "static: bootstrap pending", "", BOOTSTRAP_PENDING_SECTION)
 
         budget.add("static: silent replies", "", SILENT_REPLIES_SECTION)
-        budget.add("static: saving gate", "", _SAVING_GATE_SECTION)
+        # Resolve the path instead of hardcoding it: `read` resolves relative paths under the **user
+        # workspace**, but this file lives in the **agent package**. When the two roots differ
+        # (installer layout: `--default-agent {app}` vs `--default-workspace {Desktop}\haitun交付`),
+        # a bare `skills/...` never resolves and the rule set silently never loads.
+        # Same shape as the help guidance above.
+        saving_skill_md = await _resolve_skill_path(ws, "saving-decision")
+        if saving_skill_md is not None:
+            budget.add("static: saving gate", "", _SAVING_GATE_SECTION.format(path=str(saving_skill_md)))
+            logger.info("Saving-decision rule set reachable at %s", saving_skill_md)
+        else:
+            # Losing the whole rule set is worth a warning: without this file the agent still
+            # answers saving questions, just without the gates (voucher_rules / subsidy_calc /
+            # state discipline).
+            logger.warning(
+                "saving-decision/SKILL.md not found under %s - saving rule set will NOT be injected",
+                ws / "skills",
+            )
+            budget.add("static: saving gate (no rule set found)", "", _SAVING_GATE_SECTION_MISSING)
         budget.add_if(model_identity := build_model_identity_line(model), "model identity line", "", model_identity)
 
         # NOTE: the heartbeat instruction is intentionally NOT injected here.
@@ -1489,7 +1530,8 @@ def _build_profile_policy(topic_profile: dict[str, Any]) -> str:
         "## 强制监督规则\n\n"
         "0. **任务执行优先**: 若当前请求是 Workflow 编排或执行, 跳过以下教学规则, "
         "以流程构建、运行结果和用户交付要求为准。\n"
-        "1. **确定性标记**: 事实性陈述使用 `[已确认]`、`[推断]` 或 `[需验证]`。\n"
+        "1. **确定性标记**: 事实性陈述使用 `[Confirmed]`、`[Inferred]` 或 `[Pending Verification]`"
+        "(全仓统一英文标注词表, 见 skills/saving-decision/SKILL.md; 不得使用中文等价词)。\n"
         "2. **反例注入**: 每个核心概念给出一个反例或边界场景。\n"
         f"{socratic}\n4. **破圈引导**: 是否破圈由旁路监督按当前问题决定, 不绑定固定轮次。\n"
         "5. **画像匹配**: 按教学指令控制深度、术语和决策信息。\n"
@@ -1605,8 +1647,39 @@ recommendations, cart-filling), these core rules ALWAYS apply:
    [Unverified] - do NOT hand-compute.
 3. Recommendation / guide tasks: first call review_search for candidate articles; only if it returns empty or
    fails may you search on your own.
-4. Also load and follow `skills/saving-decision/SKILL.md` (read it with the read tool) for the full rule set.
+4. Also load and follow the full rule set at `{path}`
+   (read it with the read tool; this is an absolute path - do not shorten it to `skills/...`, which would
+   resolve under the workspace instead and not exist).
+5. Local consumption vouchers (地方消费券): once you have obtained a voucher's terms **by any means** - opened
+   a page, read scrape output, or lifted them from a search result - run those terms through `voucher_rules`
+   before writing the answer. Do NOT state an amount / threshold / validity window that has not been through
+   it: source, verification date and validity window are gated there and nowhere else. If the page states no
+   validity window, still call it and report the voucher as unverified - that is a correct result, and it is
+   the only way "unknown window" stays distinguishable from "valid forever".
+   (Rule 5 is deliberately duplicated here rather than left to the rule set alone: the rule set is loaded by
+   a read the model may skip, and when it is skipped the gate silently disappears.)
 Ignore this section for non-saving tasks.
+
+"""
+
+# Injected instead of ``_SAVING_GATE_SECTION`` when the rule set file itself is missing. The core rules
+# stay (they are self-contained), but the agent must not be told to read a path that does not exist --
+# "go read this file" + a missing file is how the model ends up inventing the contents.
+_SAVING_GATE_SECTION_MISSING = """\
+## Saving-decision core rules
+For purchase / money-saving requests (national subsidy, coupons, price comparison, bank instant discounts,
+recommendations, cart-filling), these core rules ALWAYS apply:
+1. Policy parameters (rate / cap / threshold / energy-efficiency / categories) come ONLY from this session's
+   retrieval or a fact-card snapshot (with verification date) - never from memory, never by reverse-engineering
+   from product price.
+2. Computing money (subsidy / final price): call subsidy_calc when available; if unavailable or failed, mark
+   [Unverified] - do NOT hand-compute.
+3. Recommendation / guide tasks: first call review_search for candidate articles; only if it returns empty or
+   fails may you search on your own.
+Ignore this section for non-saving tasks.
+The detailed saving rule set is not installed here, so the three rules above are all you have: when a request
+needs more than they cover, say so plainly rather than reconstructing the missing rules from memory.
+
 """
 
 
