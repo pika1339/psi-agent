@@ -13,7 +13,7 @@ fire: prompt
 | 数据源 | 参数 |
 |---|---|
 | 团队 TODO 看板表 | 链接 https://genuineknowledge.feishu.cn/wiki/H6icwLWn1iwpXAk73QMcA6MgnWc —— /wiki/ 链接先 `feishu_api` GET /open-apis/wiki/v2/spaces/get_node 换 obj_token,再读表;表结构(表头行/人名列/最新日期列)每次现场探,不写死 |
-| 请假事实 | `feishu_leave_query`,approval_code=`99EEC396-536A-4C7A-8B2D-412584E35CE3`(只算已通过;审批中/读不出必须单独报告) |
+| 请假事实 | `feishu_leave_query`,approval_code=`99EEC396-536A-4C7A-8B2D-412584E35CE3`(只算已通过;审批中/读不出必须单独报告)。**返回 `ok: true` 即请假事实的唯一来源,不得再绕查审批原始接口** |
 
 ## 流程(只管"写没写",不管"写得规不规范")
 
@@ -21,7 +21,7 @@ fire: prompt
    - **本轮实时重读纪律:每轮必须 `feishu_sheet_read` 重新实时读表(当期列整列 + 人名列 + mentor 列),名单/判定只能来自本轮读取结果,禁止复用任何上一轮/上一时点的清单;每个被判定的人必须在本轮读表结果中出现过;读表返回 has_more=true 时不得下结论。**
 2. **离职/无法识别人员先过滤**:名单先交 `feishu_member_status_check` 分类。已离职/冻结(resigned)→ **不提醒、不催,且收尾报告完全不体现、不解释**(不出现「疑似离职」字样);解析失败(unresolved,重名)→ 标记「解析失败,需人工」,不提醒,单列。不得把解析失败的人当「未写」催。
 3. 逐人看当期列:非空 → 跳过,不打扰。
-4. 空白 → 先 `feishu_leave_query` 查该人该日是否落在**已通过**请假区间:
+4. 空白 → 先 `feishu_leave_query` 查该人该日是否落在**已通过**请假区间(**返回 `ok: true` 即请假事实唯一来源,不得再绕查审批原始接口**):
    - 请假免填 → 跳过,不提醒;
    - 审批中(skipped_not_approved)/日期读不出(needs_fix)→ 不提醒,但记录;
    - 无请假 → **未写**。
@@ -35,6 +35,7 @@ fire: prompt
 ## 硬顺序与红线
 
 - **查假在下结论之前**:先拿到 空白(人×日期)清单,查完请假,才可以说「未写」。顺序颠倒 = 把休假的人当没写催。
+- **请假事实唯一来源**:`feishu_leave_query` 返回 `ok: true` 即请假事实的唯一来源,不得再去查审批原始接口(`feishu_approval_get` / approval instances 列表等);返回非 ok 时报查询失败并停手,不自行绕查。
 - 表头日期与请假日期比对前先归一成 ISO(表头 `9.2` 这类无年份写法按当年解释;跨年不确定的记「待人工确认」,不提醒)。
 - 读表/查假失败要明说查询失败,不得顺势当作未写提醒。
 - 本任务**不做结构/规范检查**(那是 15:00 的 todo-writing-check);已填但写得不规范的人,本任务不打扰。
