@@ -652,10 +652,12 @@ async def _build_skills_index(workspace_dir: anyio.Path) -> str:
 
     manifest: dict[str, str] = {}
     skill_contents: dict[str, str] = {}
+    path_by_name: dict[str, str] = {}
     for name, skill_md in skill_entries:
         content = await _read_file_optional(skill_md)
         if content is None:
             continue
+        path_by_name[name] = str(skill_md)
         skill_contents[name] = content
         # 清单里带**层名**: 只记 sha256 时"同名同字节但来自不同层"不可区分, 于是层序
         # 一变(个人层加了个与官方逐字相同的副本, 或个人层那份被删)快照仍然命中, 提示词
@@ -681,7 +683,21 @@ async def _build_skills_index(workspace_dir: anyio.Path) -> str:
         content = skill_contents[name]
         if not content:
             continue
-        skill_info: dict[str, str] = {"name": name, "description": "", "category": ""}
+        skill_info: dict[str, str] = {
+            "name": name,
+            "description": "",
+            "category": "",
+            # Where this skill's SKILL.md actually is. The index used to carry the
+            # name only, and the prompt tells the model to read `skills/<name>/SKILL.md`
+            # — a relative path, which the file tools resolve under the **user
+            # workspace** while skills live in the **agent package**. When those two
+            # roots differ (installer layout, and every `agent != workspace` Session)
+            # the model could only guess an absolute path and silently skipped the
+            # skill when it guessed wrong. The read tool now resolves the `skills/`
+            # literal itself (see `_runtime_paths.is_skill_ref`); this attribute is
+            # the second half — the reader never has to guess at all.
+            "path": path_by_name.get(name, ""),
+        }
         if content.startswith("---"):
             end = content.find("\n---", 3)
             if end != -1:
@@ -714,6 +730,8 @@ async def _build_skills_index(workspace_dir: anyio.Path) -> str:
             lines.append(f'  <category name="{cat}">')
             for s in cat_skills:
                 lines.append(f'    <skill name="{s["name"]}"')
+                if s.get("path"):
+                    lines.append(f'      path="{s["path"]}"')
                 if s.get("description"):
                     lines.append(f'      description="{s["description"]}"')
                 lines.append("    />")
@@ -721,6 +739,8 @@ async def _build_skills_index(workspace_dir: anyio.Path) -> str:
     else:
         for s in skills:
             lines.append(f'  <skill name="{s["name"]}"')
+            if s.get("path"):
+                lines.append(f'    path="{s["path"]}"')
             if s.get("description"):
                 lines.append(f'    description="{s["description"]}"')
             lines.append("  />")

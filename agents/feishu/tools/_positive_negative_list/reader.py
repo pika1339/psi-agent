@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import time
@@ -194,6 +195,14 @@ def parse_query(query_json: str, *, page_size: int = 100, page_token: str = "", 
         raise ValueError(f"query_json is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError("query_json must be a JSON object")
+    # 直觉命名与工具命名的差: 模型几乎必然写 date_from / date_to, 而查询字段叫
+    # occurred_from / occurred_to —— 只认后者的表现是「unknown query fields」, 读者
+    # 无从知道该写哪个, 于是报告类请求连一条记录都读不到(2026-09-22 实机)。
+    # 别名在这里归一, 下游只认规范名; 真拼错的字段照旧报错, 不静默忽略。
+    for alias, canonical in (("date_from", "occurred_from"), ("date_to", "occurred_to")):
+        if alias in raw:
+            raw.setdefault(canonical, raw[alias])
+            raw.pop(alias)
     unknown = set(raw) - _QUERY_FIELDS
     if unknown:
         raise ValueError(f"unknown query fields: {', '.join(sorted(map(str, unknown)))}")
@@ -218,6 +227,45 @@ def parse_query(query_json: str, *, page_size: int = 100, page_token: str = "", 
 
 def _condition(field_name: str, operator: str, value: str) -> dict[str, Any]:
     return {"field_name": field_name, "operator": operator, "value": [value]}
+
+
+_ONE_DAY_MS = 86_400_000
+
+
+def _date_operand_ms(value: str) -> int:
+    """Normalise a date filter operand to epoch milliseconds.
+
+    Accepts ``YYYY-MM-DD`` / ``YYYY/MM/DD`` / ``YYYY.MM.DD`` (the day is taken
+    in the process time zone, matching how the ledger stores its date column)
+    or raw epoch milliseconds.
+    """
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            return int(datetime.datetime.strptime(text, fmt).timestamp() * 1000)
+        except ValueError:
+            continue
+    raise ValueError(f"日期筛选值 {value!r} 无法识别；请用 YYYY-MM-DD（如 2026-09-01）或毫秒时间戳。")
+
+
+def _date_bound(field_name: str, value: str, *, lower: bool) -> dict[str, Any]:
+    """One open end of a date range, in an operator the date field accepts.
+
+    The ledger's 记录日期 column is a Feishu date field, and Feishu **does not
+    support** ``isGreaterEqual`` / ``isLessEqual`` on date fields: it accepts
+    them and then matches nothing, so a range filter used to come back as
+    「一条都没有」 rather than as an error (2026-09-22).  Only ``is`` /
+    ``isGreater`` / ``isLess`` work, and a date operand must be written as
+    ``["ExactDate", "<ms>"]``.  A closed range is therefore expressed as
+    *strictly after the previous day* and *strictly before the next day* —
+    which for equal bounds collapses to exactly that one day.
+    """
+    millis = _date_operand_ms(value)
+    if lower:
+        return {"field_name": field_name, "operator": "isGreater", "value": ["ExactDate", str(millis - _ONE_DAY_MS)]}
+    return {"field_name": field_name, "operator": "isLess", "value": ["ExactDate", str(millis + _ONE_DAY_MS)]}
 
 
 def build_filter(query: LedgerQuery, field_names: Mapping[str, str] | None = None) -> str:
@@ -245,9 +293,9 @@ def build_filter(query: LedgerQuery, field_names: Mapping[str, str] | None = Non
     if query.keyword:
         conditions.append(_condition(names["fact_summary"], "contains", query.keyword))
     if query.occurred_from:
-        conditions.append(_condition(names["occurred_at"], "isGreaterEqual", query.occurred_from))
+        conditions.append(_date_bound(names["occurred_at"], query.occurred_from, lower=True))
     if query.occurred_to:
-        conditions.append(_condition(names["occurred_at"], "isLessEqual", query.occurred_to))
+        conditions.append(_date_bound(names["occurred_at"], query.occurred_to, lower=False))
     return json.dumps({"conjunction": "and", "conditions": conditions}, ensure_ascii=False) if conditions else ""
 
 

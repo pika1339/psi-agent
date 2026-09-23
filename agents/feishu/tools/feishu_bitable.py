@@ -26,6 +26,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+import _feishu_api_impl as _api
 import _feishu_impl as _f
 
 
@@ -182,6 +183,8 @@ async def feishu_bitable_search_records(
             last_modified_by (default false).
         user_key: The sender's open_id (from ``<feishu_context>``).
     """
+    if refusal := _api.ledger_table_refusal(app_token, table_id, endpoint="feishu_bitable_search_records"):
+        return _f.dumps_result(refusal)
     return _f.dumps_result(
         await _f.search_bitable_records_impl(
             app_token,

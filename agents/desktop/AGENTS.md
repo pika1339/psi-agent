@@ -112,12 +112,27 @@ service tools:
 | `agent_dir()` / `resolve_agent()` | 显式参数 → `get_agent()` → 回落 `workspace_dir()` | `skills/`（`skill_manage`） |
 | system prompt「Workspace」段 | `system_prompt_builder` 经 `get_workspace()` 注入用户打开目录（**刻意为之**：勿用 `__file__` 当文件 IO 根，否则 agent≠workspace 时模型会把产出写进能力包） | 引导模型相对路径 / `[SEND:]` 落在用户工作区 |
 | `resolve_user_path(path)` | 相对 → 拼到 workspace；绝对路径原样 | `read` / `write` / `edit` / `list_dir` / `find_files` |
+| `is_skill_ref(path)` / `skill_ref_fallback(path)` | 只有 `skills/...` 这一个相对前缀：workspace 里没有该文件时改读 **agent 包** | `read`（提示词里 20 多处按 `skills/<name>/SKILL.md` 指技能，而技能住在能力包，不是用户 workspace） |
 | AppData todos（第 4B） | `resolve_appdata_root()` → `{appdata}/todos/{session_id}.json`；读时双读 legacy `{workspace}/.psi/todos/` | `todo` tool / Gateway `GET …/todos` |
 | AppData todo segments | 同根 → `{appdata}/todos/{session_id}.segments.json`（`merge=false` 开新段） | spa-v2「任务历史」/ `GET …/todo-segments` |
 | AppData history（第 4C） | 同上根 → `{appdata}/histories/{session_id}.jsonl`；读时双读 legacy `{workspace}/histories/` | Session JSONL / `sessions_list` / `GET …/history` |
 | AppData Gateway state（第 4D） | 同上根 → `{appdata}/state/latest.json`；读时双读 cwd `state/latest.json` | Gateway 重启恢复 AI/Session/Title |
 
 **刻意为之**：AppData 路径用 `platformdirs` / `--appdata` / `PSI_APPDATA`，禁止手写死 `%AppData%`；不把 AppData 塞进 Session ContextVar。
+
+**为什么 `skills/` 要回落 agent 包（2026-09-22 修，勿当"多此一举"删掉）**：提示词里 20 多处示范
+`read skills/<name>/SKILL.md`，而 `resolve_user_path` 把每个相对路径都送到用户 workspace —— 技能却在
+能力包。两个根曾经是**同一个目录**，所以那句字面量一直成立；`agent ≠ workspace` 之后它**整类变成
+死路径**（PR #485 定下解析语义、PR #769 把两个根拆开，两次改动各自都对）。代价是静默的：`read` 只回
+一句 `[Error] File not found: ...` 字符串，不进日志、不抛异常，模型换个做法继续 —— 2026-09-22 那份
+正负面清单报告就是这么丢掉整套认知口径的（会话读到的 SKILL.md 全在别处的旧副本上）。
+现在两半一起补：`read` 认这个字面量，索引发 `path`（见下），判据
+`agents/feishu/tests/test_skill_path_resolution.py`。
+
+**Skills 索引带 `path`（同一次修复的另一半）**：`_build_skills_index` 的每个 `<skill>` 现在带
+`path="<agent 包内 SKILL.md 的绝对路径>"`。原先只发 `name` + `description`，模型拿到"该读这个技能"
+的指令却**不知道文件在哪**，只能猜绝对路径 —— 猜中就中，猜不中就静默降级成"没这个技能"。索引本来
+就持有 `skill_md`，只是没把它渲染出去。
 
 ### 政策资料卡（`fact-cards/`）—— 政策参数的唯一数据源
 

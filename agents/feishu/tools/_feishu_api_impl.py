@@ -129,6 +129,72 @@ def _warning_for(uri: str) -> str:
     return ""
 
 
+def ledger_read_refusal(verb: str, path: str, query: dict[str, Any], paths: dict[str, Any]) -> dict[str, Any] | None:
+    """Refuse a raw read of the positive-negative ledger, naming the tools that work.
+
+    2026-09-22, a real 正负面清单 report session: the model exported the ledger grid
+    through this tool, aggregated it with its own ``python_run``, and wrote the Word
+    file itself. Every number in the result was right and the entire 认知口径 was
+    missing — because that cognition is returned by ``positive_negative_rules`` /
+    ``positive_negative_case_analyze``, and neither was called. The report came out
+    framed as 正面-vs-负面 scorekeeping (「只红不绿」「负面反超」, 44 negative records
+    with no 改正路径 at all), which is the exact reading the 08-22 全员会 forbids.
+
+    So the aggregation endpoint is closed here rather than asked about in the prompt:
+    a rule that lives in SKILL.md is only as strong as the model's willingness to read
+    it. Writes are deliberately left alone — candidates, reviews and the confirmed
+    write path have their own tools and their own tests, and this guard exists to stop
+    a *read* from becoming a report.
+
+    Matched on coordinates, not on the endpoint shape: the guard fires when the
+    request addresses the ledger table, and only when the endpoint is the record
+    read. Field metadata (``.../fields``) stays open — writing preflight reads it
+    on purpose (see the skill's 工具调用场景 table).
+
+    The coordinates are imported from the pipeline rather than repeated, and the import
+    is lazy because ``_positive_negative_list.runtime`` imports ``_feishu_impl`` (which
+    imports this module) — a module-level import here would be circular.
+    """
+    if verb != "GET" or not path.rstrip("/").endswith("/records"):
+        return None
+    values = {str(value) for value in (*query.values(), *paths.values())}
+    try:
+        from _positive_negative_list import runtime as _pnl_runtime  # noqa: PLC0415 — circular at import time
+    except ImportError:  # pragma: no cover — pipeline package absent (partial deploy)
+        return None
+    app_token, table_id = _pnl_runtime.read_target_coordinates()
+    if app_token not in values or table_id not in values:
+        return None
+    return ledger_guard_refusal(endpoint=path)
+
+
+def ledger_guard_refusal(*, endpoint: str = "") -> dict[str, Any]:
+    """The refusal text itself, shared by every door into the ledger's records."""
+    return _f.error_result(
+        "禁止直接读取正负面清单台账 —— 这条读法会绕过认知口径。原始记录请用 "
+        "positive_negative_case_read (分页、人员过滤与列名映射都在它里面), "
+        "汇总/报告/图表一律经 positive_negative_case_analyze, 规则与认知口径经 "
+        "positive_negative_rules; 分析工具的返回里有面向用户的认知口径与固定披露, "
+        "自建脚本聚合出来的条数与分布没有那层口径。"
+        "(读台账表的**字段元数据**不受此限, 那是写前预检。)",
+        code="use_dedicated_tool",
+        tool="positive_negative_case_read / positive_negative_case_analyze",
+        endpoint=endpoint or None,
+    )
+
+
+def ledger_table_refusal(app_token: str, table_id: str, *, endpoint: str = "") -> dict[str, Any] | None:
+    """Same guard for the dedicated bitable tools, which do not pass through ``feishu_api``."""
+    try:
+        from _positive_negative_list import runtime as _pnl_runtime  # noqa: PLC0415 — circular at import time
+    except ImportError:  # pragma: no cover — pipeline package absent (partial deploy)
+        return None
+    ledger_app, ledger_table = _pnl_runtime.read_target_coordinates()
+    if (app_token or "").strip() != ledger_app or (table_id or "").strip() != ledger_table:
+        return None
+    return ledger_guard_refusal(endpoint=endpoint)
+
+
 def _skills_dir() -> str:
     """Where the endpoint tables live. Agent root, same place the model reads them from."""
     return str(pathlib.Path(_paths.agent_dir()) / "skills")
@@ -343,6 +409,9 @@ async def call_api_impl(
             f'uri has unfilled placeholders {missing}; supply them in paths_json, e.g. \'{{"{missing[0]}":"..."}}\'.',
             code="missing_path_params",
         )
+
+    if refusal := ledger_read_refusal(verb, path, query, paths):
+        return refusal
 
     # Endpoint table: refuse what it says cannot work, then fill the defaults it
     # declares. Both happen before the request is built, so a violation costs nothing.

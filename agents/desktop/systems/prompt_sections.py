@@ -513,6 +513,7 @@ ambiguous.\
 SKILLS_HEADER_TEMPLATE = """\
 ## Skills
 Scan <available_skills>. If one clearly applies, read its SKILL.md with `{read_tool}`, then follow it.
+Use the entry's `path` — that is where the file actually is. `{read_tool}("skills/<name>/SKILL.md")` also works: relative paths resolve under your workspace, and for `skills/...` the agent package is searched when the workspace has no such file (skills belong to the capability package, not to your delivered files).
 **Before recommending 3+ products, brands, or parallel options, read `skills/structured-output-tables/SKILL.md`.**
 **Before `skill_manage(create)`:** read `skills/skill-authoring-when/SKILL.md` — always `list` first; if a similar skill exists, `patch` it (do not create a parallel skill). How to write: `skills/skill-authoring-how/SKILL.md`. This gate applies before self-evolution too.
 **Sensitive-secret gate (hard):** if the user message or a tool result contains a likely secret (`sk-…`, JWT `eyJ…`, `api_key=`/`token=`/`Bearer …` with a long value, or a file like `敏感串.txt`), you MUST `read` `skills/sensitive-secret-response/SKILL.md` first and follow it (`secret_scrub` + forced risk notice + key-rotation advice; skip the notice only if the user explicitly insists there is no security risk). This gate overrides "if none clearly apply, read none".

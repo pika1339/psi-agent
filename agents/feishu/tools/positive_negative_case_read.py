@@ -100,6 +100,24 @@ async def positive_negative_case_read(
             view_id=runtime.configured_read_view_id(),
         )
         query = replace(parsed, page_size=100, page_token="")
+        # 视图与过滤条件互斥: 搜索接口同时收到 view_id 与 filter 时直接报错(飞书会忽略
+        # view 做全表搜索), 于是**任何带条件的读取都失败**, 表现为「暂时无法读取」。
+        # 没有条件时保留视图(读到的是视图那一版记录); 有条件时按全表搜索,
+        # 与汇总工具的范围保持一致。
+        if any(
+            getattr(query, key)
+            for key in (
+                "record_id",
+                "subject_user_key",
+                "reporter_user_key",
+                "nature",
+                "category",
+                "keyword",
+                "occurred_from",
+                "occurred_to",
+            )
+        ):
+            query = replace(query, view_id="")
         actual_names = await reader.list_table_field_names(*runtime.read_target_coordinates())
         blocker = await reader.reject_unavailable_filters(query, actual_names)
         if blocker is not None:

@@ -9,7 +9,10 @@ async def read(file_path: str, offset: int = 0, limit: int = 0) -> str:
     """Read file contents, optionally with line offset and limit.
 
     Relative paths resolve under the current Session workspace
-    (``get_workspace()``). Absolute paths are used as-is.
+    (``get_workspace()``). Absolute paths are used as-is. **Exception:** a
+    relative path under ``skills/`` that the workspace does not contain is read
+    from the agent package instead — skills are part of the capability package,
+    and the prompt points at them as ``skills/<name>/SKILL.md`` everywhere.
 
     Args:
         file_path: Path to the file to read.
@@ -20,6 +23,8 @@ async def read(file_path: str, offset: int = 0, limit: int = 0) -> str:
         File contents as a string, or an error message if the file cannot be read.
     """
     path = _paths.resolve_user_path(file_path)
+    if _paths.is_skill_ref(file_path) and not await path.exists():
+        path = _paths.skill_ref_fallback(file_path)
     if not await path.exists():
         return f"[Error] File not found: {path}"
     if not await path.is_file():
