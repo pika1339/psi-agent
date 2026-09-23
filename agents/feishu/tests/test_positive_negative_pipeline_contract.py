@@ -1915,7 +1915,7 @@ def test_read_accepts_trusted_identity_filter_and_reads(monkeypatch) -> None:
 
     async def fake_read_records(client, query, user_key):
         assert query.subject_user_key == "ou_subject"
-        assert query.page_size == 100
+        assert query.page_size == 50  # 默认页大小: 50 x ~222 字符, 让一页落在 20k 结果上限之内
         return {"ok": True, "records": [], "has_more": False, "page_token": ""}
 
     async def fake_public(result):
@@ -1945,11 +1945,13 @@ def test_read_bad_query_returns_unified_chinese_failure() -> None:
     assert "解析" in payload["说明"]
 
 
-def test_single_page_read_text_points_to_analyze_tool_not_manual_paging() -> None:
+def test_single_page_read_text_keeps_both_the_cursor_and_the_analyze_mandate() -> None:
     reader = importlib.import_module("_positive_negative_list.reader")
     projection = reader._public_result({"ok": True, "records": [], "has_more": True})
     assert "汇总分析" in projection["读取状态"]
-    assert "下一页" not in projection["读取状态"]
+    assert "汇总分析" in projection["读取状态"]
+    assert projection["还有更多"] is True
+    assert projection["下一页游标"] == ""
 
 
 # ---------------------------------------------------------------------------

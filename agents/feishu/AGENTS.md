@@ -287,6 +287,19 @@ service tools:
 坐标来自 `_positive_negative_list.runtime.read_target_coordinates()`，不在护栏里另写一份。
 判据 `agents/feishu/tests/test_positive_negative_read_guard.py`。
 
+**台账读取的分页契约与文档读取的结构化截断 (2026-09-22 加)**：
+两件事同一个病因 —— **按字符截断把“可分页的数据”变成“随机丢尾”**。
+
+| 位置 | 病状 | 修法 |
+|---|---|---|
+| `positive_negative_case_read` | 一页 100 条在公开投影里约 **21.8k 字符**，而单条工具结果有 `MAX_TOOL_RESULT_CHARS = 20000` 硬上限；工具还写死 `page_size=100` 并丢掉游标 —— 模型既读不完也无法续读，只能从头再读(实测一轮连调 5 次) | 默认 `page_size=50`、上限 60（由模型自己定），并在返回里给出 `还有更多` / `下一页游标` |
+| `read_document` | 超限时 `text[:limit] + "[Truncated at N characters]"`，落在表格中间则读不出“表坏了”与“没读全” | 按**行边界**裁表格、表头永远保留，并用 `[未列出]` 说清丢了多少行/多少块 |
+| `feishu_doc_read` | 只给 `truncated: true`，不说截在哪 | 同样按行切，并在 `omitted` 里报“还有 N 行未返回（表格行：已给 x / 共 y）” |
+
+**制约（勿当“冗余”删）**：分页信号与“全量统计只能从汇总分析工具来”必须**并存** ——
+只给前者的旧版本会让模型自己跨页累计出结论（那正是丢掉认知口径的路径）；只给后者则让它拿到一页被砍尾巴的数据。
+判据：`tests/agents/feishu/test_pnl_read_contract.py`（分页走完全量、游标缺失即报错、默认页不超上限、截断落在行边界）。
+
 ## Skills (`skills/`)
 
 - **调用面约束（防空转，刻意为之）**：`feishu-*` / `browser-mcp`（及同类 `*-mcp`）/ `subagent-orchestration` 均含「调用面约束」——接口表/MCP 表名不是顶层工具名；`Tool not found` / 非法参数时停止换名连打，改扫 live `tools`。运行时配合 Session `CALL_SURFACE_ERROR_LIMIT`（见 `session/AGENTS.md`「回合收敛」）。

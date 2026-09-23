@@ -104,15 +104,35 @@ async def read_doc_impl(file_type: str, token: str, max_chars: int) -> dict[str,
         return res
 
     truncated = False
+    omitted_note = ""
     if max_chars > 0 and len(content) > max_chars:
-        content = content[:max_chars]
+        # Cut on a line boundary, not mid-cell: a Markdown table cut mid-row reads as
+        # a corrupted table, and the reader cannot tell that from a short one.  The
+        # dropped line count is then reported, so "the table ends here" and "I only
+        # got part of the table" stop looking the same.
+        lines = content.splitlines()
+        kept: list[str] = []
+        used = 0
+        for line in lines:
+            if used + len(line) + 1 > max_chars and kept:
+                break
+            kept.append(line)
+            used += len(line) + 1
+        dropped = len(lines) - len(kept)
+        rows = sum(1 for line in lines if line.lstrip().startswith("|"))
+        kept_rows = sum(1 for line in kept if line.lstrip().startswith("|"))
+        content = "\n".join(kept)
         truncated = True
+        omitted_note = f"\u5df2\u622a\u65ad\uff1a\u8be5\u6587\u6863\u8fd8\u6709 {dropped} \u884c\u672a\u8fd4\u56de"
+        if rows and kept_rows < rows:
+            omitted_note += f"\uff08\u5176\u4e2d\u8868\u683c\u884c\uff1a\u5df2\u7ed9 {kept_rows} / \u5171 {rows}\uff09"
     return {
         "ok": True,
         "file_type": ft,
         "token": token,
         "content": content,
         "truncated": truncated,
+        "omitted": omitted_note,
     }
 
 

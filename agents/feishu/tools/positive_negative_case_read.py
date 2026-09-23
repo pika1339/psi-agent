@@ -53,6 +53,12 @@ def _normalize_person_filters(raw_query: dict[str, Any], user_key: str) -> dict[
     return raw_query
 
 
+#: Records per page when the caller does not ask for a size.
+DEFAULT_PAGE_SIZE = 50
+#: Hard ceiling: 60 records x ~222 chars stays under the framework's 20k result cap.
+MAX_PAGE_SIZE = 60
+
+
 async def positive_negative_case_read(
     query_json: str = "",
     user_key: str = "",
@@ -81,10 +87,14 @@ async def positive_negative_case_read(
         user_key: Trusted Feishu sender identity.
 
     Returns:
-        JSON with readable Chinese record fields and a natural-language read
+        JSON with readable Chinese record fields, an explicit page contract
+        (`还有更多` / `下一页游标`) and a natural-language read
         status.  Full-ledger statistics belong to the analyze tool; this tool
-        reads a single page only and never returns a pagination cursor to the
-        chat model.
+        reads **one page** — keep calling it with the returned cursor until
+        `还有更多` is false before treating anything as the whole ledger.
+        `page_size` (default 50, max 60) is a character budget, not a style
+        choice: the framework caps one tool result at 20k chars, and a record
+        costs ~222 chars here, so a 100-record page is truncated in transit.
     """
     try:
         raw_query = json.loads(query_json) if query_json.strip() else {}
@@ -95,15 +105,19 @@ async def positive_negative_case_read(
         adapter = runtime.configured_read_table_adapter()
         parsed = reader.parse_query(
             query_json,
-            page_size=100,
+            page_size=DEFAULT_PAGE_SIZE,
             page_token="",
             view_id=runtime.configured_read_view_id(),
         )
-        query = replace(parsed, page_size=100, page_token="")
-        # 视图与过滤条件互斥: 搜索接口同时收到 view_id 与 filter 时直接报错(飞书会忽略
-        # view 做全表搜索), 于是**任何带条件的读取都失败**, 表现为「暂时无法读取」。
-        # 没有条件时保留视图(读到的是视图那一版记录); 有条件时按全表搜索,
-        # 与汇总工具的范围保持一致。
+        # Honour the caller's page_size (the model chooses it when it needs a
+        # readable page instead of a truncated one) but never exceed MAX_PAGE_SIZE:
+        # the result travels through a 20k-char cap, and the tail that would be
+        # cut is exactly where the cursor and the last records live.
+        page_size = min(max(int(parsed.page_size or DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE)
+        query = replace(parsed, page_size=page_size, page_token=parsed.page_token or "")
+        # 视图与过滤条件互斥: 搜索接口同时收到 view_id 与 filter 时直接报错(飞书会忽略 view 做全表搜索),
+        # 于是**任何带条件的读取都失败**, 表现为「暂时无法读取」。没有条件时保留视图(读到的是视图那一版记录);
+        # 有条件时按全表搜索, 与汇总工具的范围保持一致。
         if any(
             getattr(query, key)
             for key in (
@@ -118,6 +132,7 @@ async def positive_negative_case_read(
             )
         ):
             query = replace(query, view_id="")
+
         actual_names = await reader.list_table_field_names(*runtime.read_target_coordinates())
         blocker = await reader.reject_unavailable_filters(query, actual_names)
         if blocker is not None:
